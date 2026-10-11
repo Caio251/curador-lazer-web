@@ -166,7 +166,10 @@ elif st.session_state.gastro_step == 2:
         st.subheader(f"💰 Passo 2 de 3: Qual a faixa de preço para culinária {st.session_state.selected_culinaria}?")
         
         precos = [
-            ("$", "Econômico ($)"),             ("$$", "Moderado ($$)"),             ("$$$", "Sofisticado ($$$)"),             ("$$$$", "Alta Gastronomia ($$$$)")
+            ("$", "Econômico ($)"),
+            ("$$", "Moderado ($$)"),
+            ("$$$", "Sofisticado ($$$)"),
+            ("$$$$", "Alta Gastronomia ($$$$)")
         ]
         
         cols = st.columns(4)
@@ -205,4 +208,38 @@ elif st.session_state.gastro_step == 3:
                 st.rerun()
 
         st.divider()
-        if st.button("⬅️
+        if st.button("⬅️ Voltar para Preço", key="back_2"):
+            st.session_state.gastro_step = 2
+            st.rerun()
+
+st.divider()
+
+# ---------------------------------------------------------
+# HISTÓRICO DE CONVERSA E EXECUÇÃO DA REQUISIÇÃO
+# ---------------------------------------------------------
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# Processa a última mensagem enviada pelo usuário
+if st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
+    last_user_msg = st.session_state.messages[-1]["content"]
+    
+    # Verifica se a última mensagem do histórico já foi respondida
+    already_responded = (
+        len(st.session_state.messages) > 1 and 
+        st.session_state.messages[-1]["role"] == "assistant"
+    )
+    
+    if not already_responded:
+        with st.chat_message("assistant"):
+            with st.spinner("Consultando recomendações de lazer..."):
+                bot_reply = detect_intent(last_user_msg)
+                st.markdown(bot_reply)
+                st.session_state.messages.append({"role": "assistant", "content": bot_reply})
+                st.rerun()
+
+# Campo de entrada de texto manual livre
+if user_input := st.chat_input("Ou digite uma busca específica..."):
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    st.rerun()

@@ -1,7 +1,6 @@
 import streamlit as st
 import json
 import uuid
-from google.oauth2 import service_account
 from google.cloud import dialogflowcx_v3 as dialogflow
 
 # ---------------------------------------------------------
@@ -35,9 +34,13 @@ def get_dialogflow_client():
         else:
             service_account_info = dict(secret_content)
 
-        credentials = service_account.Credentials.from_service_account_info(service_account_info)
         client_options = {"api_endpoint": f"{LOCATION}-dialogflow.googleapis.com"}
-        client = dialogflow.SessionsClient(credentials=credentials, client_options=client_options)
+        
+        # Conexão nativa usando o dicionário da conta de serviço
+        client = dialogflow.SessionsClient.from_service_account_info(
+            info=service_account_info,
+            client_options=client_options
+        )
         return client, None
     except Exception as e:
         return None, f"Erro ao criar credenciais GCP: {e}"
@@ -93,7 +96,7 @@ if "selected_preco" not in st.session_state:
     st.session_state.selected_preco = None
 
 # ---------------------------------------------------------
-# FUNÇÃO AUXILIAR PARA ENVIAR MENSAGENS
+# FUNÇÃO AUXILIAR PARA ENVIAR MENSAGENS E OBTER RESPOSTA
 # ---------------------------------------------------------
 def send_user_message(prompt):
     st.session_state.messages.append({"role": "user", "content": prompt})

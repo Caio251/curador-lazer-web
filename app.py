@@ -1,7 +1,6 @@
 import streamlit as st
 import json
 import uuid
-from google.oauth2 import service_account
 from google.cloud import dialogflowcx_v3 as dialogflow
 
 # ---------------------------------------------------------
@@ -13,12 +12,15 @@ st.set_page_config(
     layout="wide"
 )
 
+# ---------------------------------------------------------
+# CONFIGURAÇÕES DO AGENTE NA GOOGLE CLOUD
+# ---------------------------------------------------------
 PROJECT_ID = "curador-lazer-app"
 LOCATION = "us-central1"
 AGENT_ID = "eae9afb0-e7fa-49f0-9f4d-04e73002bc47"
 
 # ---------------------------------------------------------
-# AUTENTICAÇÃO E CLIENTE DIALOGFLOW
+# AUTENTICAÇÃO DIRETA VIA CLIENTE DIALOGFLOW
 # ---------------------------------------------------------
 @st.cache_resource
 def get_dialogflow_client():
@@ -32,13 +34,13 @@ def get_dialogflow_client():
         else:
             service_account_info = dict(secret_content)
 
-        credentials = service_account.Credentials.from_service_account_info(
-            service_account_info,
-            scopes=["https://www.googleapis.com/auth/cloud-platform"]
-        )
-        
         client_options = {"api_endpoint": f"{LOCATION}-dialogflow.googleapis.com"}
-        client = dialogflow.SessionsClient(credentials=credentials, client_options=client_options)
+        
+        # O próprio cliente do Dialogflow CX cria a autenticação via dicionário JSON
+        client = dialogflow.SessionsClient.from_service_account_info(
+            info=service_account_info,
+            client_options=client_options
+        )
         return client, None
     except Exception as e:
         return None, f"Erro ao criar credenciais GCP: {e}"
@@ -94,7 +96,7 @@ if "selected_preco" not in st.session_state:
     st.session_state.selected_preco = None
 
 # ---------------------------------------------------------
-# FUNÇÃO AUXILIAR PARA ENVIAR MENSAGENS
+# FUNÇÃO AUXILIAR PARA ENVIAR MENSAGENS E OBTER RESPOSTA
 # ---------------------------------------------------------
 def send_user_message(prompt):
     st.session_state.messages.append({"role": "user", "content": prompt})

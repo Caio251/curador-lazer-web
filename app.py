@@ -1,10 +1,13 @@
 import streamlit as st
 import json
 import uuid
-from google.cloud import dialogflowcx_v3 as dialogflow
+import time
+import base64
+import urllib.request
+import urllib.parse
 
 # ---------------------------------------------------------
-# CONFIGURAÇÃO DA PÁGINA (Primeira instrução Streamlit)
+# CONFIGURAÇÃO DA PÁGINA
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="Curador de Lazer e Cultura",
@@ -12,70 +15,119 @@ st.set_page_config(
     layout="wide"
 )
 
-# ---------------------------------------------------------
-# CONFIGURAÇÕES DO AGENTE NA GOOGLE CLOUD
-# ---------------------------------------------------------
 PROJECT_ID = "curador-lazer-app"
 LOCATION = "us-central1"
 AGENT_ID = "eae9afb0-e7fa-49f0-9f4d-04e73002bc47"
 
 # ---------------------------------------------------------
-# AUTENTICAÇÃO E CLIENTE DIALOGFLOW
+# GERADOR DE TOKEN OAUTH2 VIA REST (NATIVO PYTHON)
 # ---------------------------------------------------------
-@st.cache_resource
-def get_dialogflow_client():
+def base64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b'=').decode('utf-8')
+
+def get_access_token_from_service_account(info: dict) -> str:
+    """
+    Gera token de acesso OAuth2 a partir das credenciais JSON usando requisição HTTP pura.
+    Compatível com Streamlit Cloud sem depender de google-auth.
+    """
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding
+        
+        header = {"alg": "RS256", "typ": "JWT"}
+        now = int(time.time())
+        payload = {
+            "iss": info["client_email"],
+            "scope": "https://www.googleapis.com/auth/cloud-platform",
+            "aud": "https://oauth2.googleapis.com/token",
+            "exp": now + 3600,
+            "iat": now
+        }
+        
+        encoded_header = base64url_encode(json.dumps(header).encode('utf-8'))
+        encoded_payload = base64url_encode(json.dumps(payload).encode('utf-8'))
+        signing_input = f"{encoded_header}.{encoded_payload}".encode('utf-8')
+        
+        private_key_bytes = info["private_key"].encode('utf-8')
+        private_key = serialization.load_pem_private_key(private_key_bytes, password=None)
+        
+        signature = private_key.sign(
+            signing_input,
+            padding.PKCS1v15(),
+            hashes.SHA256()
+        )
+        assertion = f"{encoded_header}.{encoded_payload}.{base64url_encode(signature)}"
+        
+        params = urllib.parse.urlencode({
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "assertion": assertion
+        }).encode('utf-8')
+        
+        req = urllib.request.Request("https://oauth2.googleapis.com/token", data=params, method="POST")
+        req.add_header("Content-Type", "application/x-www-form-urlencoded")
+        
+        with urllib.request.urlopen(req) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            return data.get("access_token")
+    except Exception as e:
+        # Fallback caso cryptography não esteja presente
+        return None
+
+def detect_intent_rest(text_prompt: str) -> str:
+    """
+    Realiza a chamada de detectIntent via REST API diretamente para o Dialogflow CX.
+    """
     if "gcp_json" not in st.secrets:
-        return None, "Configuração de credenciais ('gcp_json') não encontrada nos Secrets do Streamlit."
+        return "⚠️ Configuração 'gcp_json' não encontrada nos Secrets do Streamlit."
 
     try:
         secret_content = st.secrets["gcp_json"]
-        if isinstance(secret_content, str):
-            service_account_info = json.loads(secret_content)
-        else:
-            service_account_info = dict(secret_content)
-
-        client_options = {"api_endpoint": f"{LOCATION}-dialogflow.googleapis.com"}
-        
-        # Conexão nativa usando o dicionário da conta de serviço
-        client = dialogflow.SessionsClient.from_service_account_info(
-            info=service_account_info,
-            client_options=client_options
-        )
-        return client, None
+        info = json.loads(secret_content) if isinstance(secret_content, str) else dict(secret_content)
     except Exception as e:
-        return None, f"Erro ao criar credenciais GCP: {e}"
+        return f"⚠️ Erro ao ler a chave JSON dos Secrets: {e}"
 
-def detect_intent(text_prompt):
-    session_client, err_msg = get_dialogflow_client()
-    if not session_client:
-        return f"⚠️ {err_msg}"
+    # Obter Token
+    token = get_access_token_from_service_account(info)
+    
+    # Se a conversão nativa de JWT necessitar de suporte simplificado do Google
+    url = f"https://{LOCATION}-dialogflow.googleapis.com/v3/projects/{PROJECT_ID}/locations/{LOCATION}/agents/{AGENT_ID}/sessions/{st.session_state.session_id}:detectIntent"
+    
+    body = {
+        "queryInput": {
+            "text": {
+                "text": text_prompt
+            },
+            "languageCode": "pt-br"
+        }
+    }
+    
+    headers = {
+        "Content-Type": "application/json",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    req_data = json.dumps(body).encode('utf-8')
+    req = urllib.request.Request(url, data=req_data, headers=headers, method="POST")
 
     try:
-        session_path = session_client.session_path(
-            project=PROJECT_ID,
-            location=LOCATION,
-            agent=AGENT_ID,
-            session=st.session_state.session_id
-        )
-        
-        text_input = dialogflow.TextInput(text=text_prompt)
-        query_input = dialogflow.QueryInput(text=text_input, language_code="pt-br")
-        
-        request_dialogflow = dialogflow.DetectIntentRequest(
-            session=session_path,
-            query_input=query_input
-        )
-        
-        response = session_client.detect_intent(request=request_dialogflow)
-        
-        bot_responses = []
-        for message in response.query_result.response_messages:
-            if message.text.text:
-                bot_responses.extend(message.text.text)
-                
-        return "\n\n".join(bot_responses) if bot_responses else "Não encontrei opções disponíveis no momento."
+        with urllib.request.urlopen(req) as response:
+            res_data = json.loads(response.read().decode('utf-8'))
+            
+            messages = []
+            query_result = res_data.get("queryResult", {})
+            response_messages = query_result.get("responseMessages", [])
+            for msg in response_messages:
+                text_obj = msg.get("text", {})
+                if "text" in text_obj:
+                    messages.extend(text_obj["text"])
+                    
+            return "\n\n".join(messages) if messages else "Não encontrei opções disponíveis no momento."
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode('utf-8')
+        return f"⚠️ Erro HTTP na API do Dialogflow ({e.code}): {err_body}"
     except Exception as e:
-        return f"⚠️ Erro ao consultar o Dialogflow CX: {e}"
+        return f"⚠️ Falha na comunicação com o agente: {e}"
 
 # ---------------------------------------------------------
 # ESTADO DA SESSÃO E VARIÁVEIS DE FLUXO
@@ -96,13 +148,13 @@ if "selected_preco" not in st.session_state:
     st.session_state.selected_preco = None
 
 # ---------------------------------------------------------
-# FUNÇÃO AUXILIAR PARA ENVIAR MENSAGENS E OBTER RESPOSTA
+# FUNÇÃO PARA PROCESSAR E EXIBIR A RESPOSTA
 # ---------------------------------------------------------
-def send_user_message(prompt):
+def process_user_prompt(prompt):
     st.session_state.messages.append({"role": "user", "content": prompt})
     st.session_state.gastro_step = 0
     with st.spinner("Consultando recomendações de lazer..."):
-        bot_reply = detect_intent(prompt)
+        bot_reply = detect_intent_rest(prompt)
         st.session_state.messages.append({"role": "assistant", "content": bot_reply})
 
 # ---------------------------------------------------------
@@ -128,7 +180,7 @@ if st.session_state.gastro_step == 0:
             st.markdown("### 🎭 Cultura & Arte")
             st.write("Peças de teatro, museus e exposições.")
             if st.button("Ver Programação Cultural", key="btn_cultura", use_container_width=True):
-                send_user_message("Recomende peças de teatro e museus no Rio de Janeiro")
+                process_user_prompt("Recomende peças de teatro e museus no Rio de Janeiro")
                 st.rerun()
 
     with col3:
@@ -136,7 +188,7 @@ if st.session_state.gastro_step == 0:
             st.markdown("### 🌳 Ao Ar Livre")
             st.write("Parques, praças, trilhas e natureza.")
             if st.button("Passeios ao Ar Livre", key="btn_parques", use_container_width=True):
-                send_user_message("Recomende passeios ao ar livre e parques no Rio de Janeiro")
+                process_user_prompt("Recomende passeios ao ar livre e parques no Rio de Janeiro")
                 st.rerun()
 
     with col4:
@@ -144,7 +196,7 @@ if st.session_state.gastro_step == 0:
             st.markdown("### 🎉 Fim de Semana")
             st.write("Dicas para aproveitar o sábado e domingo.")
             if st.button("Dicas de Fim de Semana", key="btn_fds", use_container_width=True):
-                send_user_message("O que fazer este fim de semana no Rio de Janeiro?")
+                process_user_prompt("O que fazer este fim de semana no Rio de Janeiro?")
                 st.rerun()
 
 # ETAPA 1: ESCOLHA DA CULINÁRIA
@@ -205,13 +257,13 @@ elif st.session_state.gastro_step == 3:
         with cols[0]:
             if st.button("🌊 Niterói", key="city_niteroi", use_container_width=True):
                 prompt = f"Recomende restaurantes de culinária {st.session_state.selected_culinaria} com faixa de preço {st.session_state.selected_preco} em Niterói."
-                send_user_message(prompt)
+                process_user_prompt(prompt)
                 st.rerun()
 
         with cols[1]:
             if st.button("🏙️ Rio de Janeiro", key="city_rio", use_container_width=True):
                 prompt = f"Recomende restaurantes de culinária {st.session_state.selected_culinaria} com faixa de preço {st.session_state.selected_preco} no Rio de Janeiro."
-                send_user_message(prompt)
+                process_user_prompt(prompt)
                 st.rerun()
 
         st.divider()
@@ -228,7 +280,7 @@ for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# Entrada de texto livre no rodapé
+# Entrada de texto no rodapé
 if user_input := st.chat_input("Ou digite uma busca específica..."):
-    send_user_message(user_input)
+    process_user_prompt(user_input)
     st.rerun()

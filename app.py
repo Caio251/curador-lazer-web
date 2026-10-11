@@ -1,11 +1,9 @@
 import streamlit as st
 import json
 import uuid
-from google.oauth2 import service_account
-from google.cloud import dialogflowcx_v3 as dialogflow
 
 # ---------------------------------------------------------
-# CONFIGURAÇÃO DA PÁGINA
+# CONFIGURAÇÃO DA PÁGINA (Primeira instrução Streamlit)
 # ---------------------------------------------------------
 st.set_page_config(
     page_title="Curador de Lazer e Cultura",
@@ -13,26 +11,52 @@ st.set_page_config(
     layout="wide"
 )
 
+# TENTATIVA DE IMPORTAÇÃO SEGURA DAS BIBLIOTECAS DA GCP
+try:
+    from google.oauth2 import service_account
+    from google.cloud import dialogflowcx_v3 as dialogflow
+    GCP_AVAILABLE = True
+except ModuleNotFoundError as e:
+    GCP_AVAILABLE = False
+    GCP_IMPORT_ERROR = str(e)
+
+# CONFIGURAÇÕES DO AGENTE NA GOOGLE CLOUD
 PROJECT_ID = "curador-lazer-app"
 LOCATION = "us-central1"
 AGENT_ID = "eae9afb0-e7fa-49f0-9f4d-04e73002bc47"
 
 # ---------------------------------------------------------
-# AUTENTICAÇÃO E CLIENTE DIALOGFLOW
+# AUTENTICAÇÃO E CLIENTE DIALOGFLOW EM CACHE
 # ---------------------------------------------------------
 @st.cache_resource
 def get_dialogflow_client():
-    if "gcp_json" in st.secrets:
-        service_account_info = json.loads(st.secrets["gcp_json"])
-        credentials = service_account.Credentials.from_service_account_info(service_account_info)
-    else:
-        credentials = None
+    if not GCP_AVAILABLE:
+        st.error(f"⚠️ Erro de dependência no ambiente Python: {GCP_IMPORT_ERROR}")
+        return None
 
-    client_options = {"api_endpoint": f"{LOCATION}-dialogflow.googleapis.com"}
-    return dialogflow.SessionsClient(credentials=credentials, client_options=client_options)
+    try:
+        if "gcp_json" in st.secrets:
+            secret_content = st.secrets["gcp_json"]
+            if isinstance(secret_content, str):
+                service_account_info = json.loads(secret_content)
+            else:
+                service_account_info = dict(secret_content)
+                
+            credentials = service_account.Credentials.from_service_account_info(service_account_info)
+            client_options = {"api_endpoint": f"{LOCATION}-dialogflow.googleapis.com"}
+            return dialogflow.SessionsClient(credentials=credentials, client_options=client_options)
+        else:
+            st.error("⚠️ Configuração de credenciais ('gcp_json') não encontrada nos Secrets do Streamlit.")
+            return None
+    except Exception as e:
+        st.error(f"⚠️ Erro ao inicializar o cliente do Dialogflow: {e}")
+        return None
 
 def detect_intent(text_prompt):
     session_client = get_dialogflow_client()
+    if not session_client:
+        return "Não foi possível conectar ao serviço de recomendações no momento."
+
     session_path = session_client.session_path(
         project=PROJECT_ID,
         location=LOCATION,
@@ -58,7 +82,7 @@ def detect_intent(text_prompt):
     return "\n\n".join(bot_responses) if bot_responses else "Não encontrei opções disponíveis no momento."
 
 # ---------------------------------------------------------
-# ESTADO DA SESSÃO E ETAPAS DO MENU
+# ESTADO DA SESSÃO E VARIÁVEIS DE FLUXO
 # ---------------------------------------------------------
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -66,9 +90,9 @@ if "messages" not in st.session_state:
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 
-# Controle do fluxo de Gastronomia
+# Controle do fluxo de Gastronomia (0: Menu Principal, 1: Culinária, 2: Preço, 3: Cidade)
 if "gastro_step" not in st.session_state:
-    st.session_state.gastro_step = 0  # 0: Menu Principal, 1: Culinária, 2: Preço, 3: Cidade
+    st.session_state.gastro_step = 0
 
 if "selected_culinaria" not in st.session_state:
     st.session_state.selected_culinaria = None
@@ -77,14 +101,10 @@ if "selected_preco" not in st.session_state:
     st.session_state.selected_preco = None
 
 # ---------------------------------------------------------
-# INTERFACE PRINCIPAL
+# INTERFACE PRINCIPAL E CARDS DE ESCOLHA
 # ---------------------------------------------------------
 st.title("🎭 Curador de Lazer e Cultura")
-st.caption("Escolha uma categoria abaixo ou monte seu filtro personalizado de gastronomia:")
-
-# ---------------------------------------------------------
-# FLUXO INTERATIVO DE GASTRONOMIA / CARDS
-# ---------------------------------------------------------
+st.caption("Escolha uma opção nos cartões abaixo ou monte seu filtro personalizado de gastronomia:")
 
 # ETAPA 0: MENU PRINCIPAL
 if st.session_state.gastro_step == 0:
@@ -171,7 +191,7 @@ elif st.session_state.gastro_step == 2:
             st.session_state.gastro_step = 1
             st.rerun()
 
-# ETAPA 3: ESCOLHA DA CIDADE E DISPARO DA CONSULTA
+# ETAPA 3: ESCOLHA DA CIDADE E ENVIO DO PEDIDO
 elif st.session_state.gastro_step == 3:
     with st.container(border=True):
         st.subheader(f"📍 Passo 3 de 3: Em qual cidade procura? (Culinária {st.session_state.selected_culinaria} • {st.session_state.selected_preco})")
@@ -182,7 +202,7 @@ elif st.session_state.gastro_step == 3:
                 cidade = "Niterói"
                 prompt_completo = f"Recomende restaurantes de culinária {st.session_state.selected_culinaria} com faixa de preço {st.session_state.selected_preco} em {cidade}."
                 st.session_state.messages.append({"role": "user", "content": prompt_completo})
-                st.session_state.gastro_step = 0  # Reseta o fluxo
+                st.session_state.gastro_step = 0
                 st.rerun()
 
         with cols[1]:
@@ -190,7 +210,7 @@ elif st.session_state.gastro_step == 3:
                 cidade = "Rio de Janeiro"
                 prompt_completo = f"Recomende restaurantes de culinária {st.session_state.selected_culinaria} com faixa de preço {st.session_state.selected_preco} no {cidade}."
                 st.session_state.messages.append({"role": "user", "content": prompt_completo})
-                st.session_state.gastro_step = 0  # Reseta o fluxo
+                st.session_state.gastro_step = 0
                 st.rerun()
 
         st.divider()
@@ -201,26 +221,30 @@ elif st.session_state.gastro_step == 3:
 st.divider()
 
 # ---------------------------------------------------------
-# HISTÓRICO DE MENSAGENS E PROCESSAMENTO DA IA
+# HISTÓRICO DE CONVERSA E EXECUÇÃO
 # ---------------------------------------------------------
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# Processa a última mensagem se for do usuário e ainda não tiver resposta
+# Processa a última mensagem enviada pelo usuário
 if st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
     last_user_msg = st.session_state.messages[-1]["content"]
-    with st.chat_message("assistant"):
-        with st.spinner("Consultando recomendações de gastronomia..."):
-            try:
+    
+    already_responded = (
+        len(st.session_state.messages) > 1 and 
+        st.session_state.messages[-1]["role"] == "assistant"
+    )
+    
+    if not already_responded:
+        with st.chat_message("assistant"):
+            with st.spinner("Consultando recomendações de lazer..."):
                 bot_reply = detect_intent(last_user_msg)
-            except Exception as e:
-                bot_reply = f"Erro ao consultar o agente: {e}"
-            st.markdown(bot_reply)
-            st.session_state.messages.append({"role": "assistant", "content": bot_reply})
-            st.rerun()
+                st.markdown(bot_reply)
+                st.session_state.messages.append({"role": "assistant", "content": bot_reply})
+                st.rerun()
 
-# Entrada manual alternativa
-if user_input := st.chat_input("Ou digite uma pergunta específica..."):
+# Campo de texto livre
+if user_input := st.chat_input("Ou digite uma busca específica..."):
     st.session_state.messages.append({"role": "user", "content": user_input})
     st.rerun()

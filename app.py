@@ -157,7 +157,7 @@ elif st.session_state.gastro_step == 1:
         culinarias = [
             "Italiana", "Japonesa", "Chinesa", "Peruana", 
             "Árabe", "Brasileira", "Asiática em geral", 
-            "Hamburgueria", "Pizzaria / Parrilla", "Outras"
+            "Hamburgueria", "Pizzaria", "Outras"
         ]
         
         cols = st.columns(5)
@@ -174,4 +174,63 @@ elif st.session_state.gastro_step == 1:
             st.rerun()
 
 # ETAPA 2: ESCOLHA DO PREÇO
-elif st.session
+elif st.session_state.gastro_step == 2:
+    with st.container(border=True):
+        st.subheader(f"💰 Passo 2 de 3: Qual a faixa de preço para culinária {st.session_state.selected_culinaria}?")
+        
+        precos = [
+            ("$", "Econômico ($)"),
+            ("$$", "Moderado ($$)"),
+            ("$$$", "Sofisticado ($$$)"),
+            ("$$$$", "Alta Gastronomia ($$$$)")
+        ]
+        
+        cols = st.columns(4)
+        for i, (simbolo, rotulo) in enumerate(precos):
+            with cols[i]:
+                if st.button(rotulo, key=f"p_{i}", use_container_width=True):
+                    st.session_state.selected_preco = simbolo
+                    st.session_state.gastro_step = 3
+                    st.rerun()
+                    
+        st.divider()
+        if st.button("⬅️ Voltar para Culinária", key="back_1"):
+            st.session_state.gastro_step = 1
+            st.rerun()
+
+# ETAPA 3: ESCOLHA DA CIDADE E DISPARO DA CONSULTA
+elif st.session_state.gastro_step == 3:
+    with st.container(border=True):
+        st.subheader(f"📍 Passo 3 de 3: Em qual cidade procura? (Culinária {st.session_state.selected_culinaria} • {st.session_state.selected_preco})")
+        
+        cols = st.columns(2)
+        with cols[0]:
+            if st.button("🌊 Niterói", key="city_niteroi", use_container_width=True):
+                prompt = f"Recomende restaurantes de culinária {st.session_state.selected_culinaria} com faixa de preço {st.session_state.selected_preco} em Niterói."
+                send_user_message(prompt)
+                st.rerun()
+
+        with cols[1]:
+            if st.button("🏙️ Rio de Janeiro", key="city_rio", use_container_width=True):
+                prompt = f"Recomende restaurantes de culinária {st.session_state.selected_culinaria} com faixa de preço {st.session_state.selected_preco} no Rio de Janeiro."
+                send_user_message(prompt)
+                st.rerun()
+
+        st.divider()
+        if st.button("⬅️ Voltar para Preço", key="back_2"):
+            st.session_state.gastro_step = 2
+            st.rerun()
+
+st.divider()
+
+# ---------------------------------------------------------
+# EXIBIÇÃO DO HISTÓRICO DE CHAT
+# ---------------------------------------------------------
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.markdown(msg["content"])
+
+# Entrada de texto livre no rodapé
+if user_input := st.chat_input("Ou digite uma busca específica..."):
+    send_user_message(user_input)
+    st.rerun()

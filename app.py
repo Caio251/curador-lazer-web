@@ -1,24 +1,23 @@
 import streamlit as st
+import json
 import uuid
+from google.oauth2 import service_account
 from google.cloud import dialogflowcx_v3 as dialogflow
 
-# CONFIGURAÇÃO DA PÁGINA
-st.set_page_config(
-    page_title="Curador de Lazer e Cultura",
-    page_icon="🎭",
-    layout="wide"
-)
-
-# CONFIGURAÇÕES DO SEU AGENTE NA GCP
+# CONFIGURAÇÕES DA GCP
 PROJECT_ID = "curador-lazer-app"
 LOCATION = "us-central1"
 AGENT_ID = "eae9afb0-e7fa-49f0-9f4d-04e73002bc47"
 
-# CLIENTE DIALOGFLOW EM CACHE (Para respostas rápidas)
+# CARREGA AS CREDENCIAIS DO STREAMLIT SECRETS
 @st.cache_resource
-def get_dialogflow_client(location):
-    client_options = {"api_endpoint": f"{location}-dialogflow.googleapis.com"}
-    return dialogflow.SessionsClient(client_options=client_options)
+def get_dialogflow_client():
+    # Lê a chave JSON armazenada na aba Secrets do Streamlit
+    service_account_info = json.loads(st.secrets["gcp_json"])
+    credentials = service_account.Credentials.from_service_account_info(service_account_info)
+    
+    client_options = {"api_endpoint": f"{LOCATION}-dialogflow.googleapis.com"}
+    return dialogflow.SessionsClient(credentials=credentials, client_options=client_options)
 
 def detect_intent(text_prompt):
     session_client = get_dialogflow_client(LOCATION)

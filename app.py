@@ -21,13 +21,12 @@ LOCATION = "us-central1"
 AGENT_ID = "eae9afb0-e7fa-49f0-9f4d-04e73002bc47"
 
 # ---------------------------------------------------------
-# AUTENTICAÇÃO E CLIENTE DIALOGFLOW EM CACHE
+# AUTENTICAÇÃO E CLIENTE DIALOGFLOW
 # ---------------------------------------------------------
 @st.cache_resource
 def get_dialogflow_client():
     if "gcp_json" not in st.secrets:
-        st.error("⚠️ Configuração de credenciais ('gcp_json') não encontrada nos Secrets do Streamlit.")
-        return None
+        return None, "Configuração de credenciais ('gcp_json') não encontrada nos Secrets do Streamlit."
 
     try:
         secret_content = st.secrets["gcp_json"]
@@ -38,15 +37,15 @@ def get_dialogflow_client():
 
         credentials = service_account.Credentials.from_service_account_info(service_account_info)
         client_options = {"api_endpoint": f"{LOCATION}-dialogflow.googleapis.com"}
-        return dialogflow.SessionsClient(credentials=credentials, client_options=client_options)
+        client = dialogflow.SessionsClient(credentials=credentials, client_options=client_options)
+        return client, None
     except Exception as e:
-        st.error(f"⚠️ Erro ao criar credenciais GCP: {e}")
-        return None
+        return None, f"Erro ao criar credenciais GCP: {e}"
 
 def detect_intent(text_prompt):
-    session_client = get_dialogflow_client()
+    session_client, err_msg = get_dialogflow_client()
     if not session_client:
-        return "Erro na autenticação local com a Google Cloud. Verifique a chave 'gcp_json' nos Secrets."
+        return f"⚠️ {err_msg}"
 
     try:
         session_path = session_client.session_path(
@@ -84,7 +83,6 @@ if "messages" not in st.session_state:
 if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 
-# Controle do fluxo de Gastronomia (0: Menu Principal, 1: Culinária, 2: Preço, 3: Cidade)
 if "gastro_step" not in st.session_state:
     st.session_state.gastro_step = 0
 
@@ -93,6 +91,16 @@ if "selected_culinaria" not in st.session_state:
 
 if "selected_preco" not in st.session_state:
     st.session_state.selected_preco = None
+
+# ---------------------------------------------------------
+# FUNÇÃO AUXILIAR PARA ENVIAR MENSAGENS
+# ---------------------------------------------------------
+def send_user_message(prompt):
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    st.session_state.gastro_step = 0
+    with st.spinner("Consultando recomendações de lazer..."):
+        bot_reply = detect_intent(prompt)
+        st.session_state.messages.append({"role": "assistant", "content": bot_reply})
 
 # ---------------------------------------------------------
 # INTERFACE PRINCIPAL E CARDS DE ESCOLHA
@@ -117,7 +125,7 @@ if st.session_state.gastro_step == 0:
             st.markdown("### 🎭 Cultura & Arte")
             st.write("Peças de teatro, museus e exposições.")
             if st.button("Ver Programação Cultural", key="btn_cultura", use_container_width=True):
-                st.session_state.messages.append({"role": "user", "content": "Recomende peças de teatro e museus no Rio de Janeiro"})
+                send_user_message("Recomende peças de teatro e museus no Rio de Janeiro")
                 st.rerun()
 
     with col3:
@@ -125,7 +133,7 @@ if st.session_state.gastro_step == 0:
             st.markdown("### 🌳 Ao Ar Livre")
             st.write("Parques, praças, trilhas e natureza.")
             if st.button("Passeios ao Ar Livre", key="btn_parques", use_container_width=True):
-                st.session_state.messages.append({"role": "user", "content": "Recomende passeios ao ar livre e parques no Rio de Janeiro"})
+                send_user_message("Recomende passeios ao ar livre e parques no Rio de Janeiro")
                 st.rerun()
 
     with col4:
@@ -133,7 +141,7 @@ if st.session_state.gastro_step == 0:
             st.markdown("### 🎉 Fim de Semana")
             st.write("Dicas para aproveitar o sábado e domingo.")
             if st.button("Dicas de Fim de Semana", key="btn_fds", use_container_width=True):
-                st.session_state.messages.append({"role": "user", "content": "O que fazer este fim de semana no Rio de Janeiro?"})
+                send_user_message("O que fazer este fim de semana no Rio de Janeiro?")
                 st.rerun()
 
 # ETAPA 1: ESCOLHA DA CULINÁRIA
@@ -185,7 +193,7 @@ elif st.session_state.gastro_step == 2:
             st.session_state.gastro_step = 1
             st.rerun()
 
-# ETAPA 3: ESCOLHA DA CIDADE E ENVIO DO PEDIDO
+# ETAPA 3: ESCOLHA DA CIDADE E DISPARO DA CONSULTA
 elif st.session_state.gastro_step == 3:
     with st.container(border=True):
         st.subheader(f"📍 Passo 3 de 3: Em qual cidade procura? (Culinária {st.session_state.selected_culinaria} • {st.session_state.selected_preco})")
@@ -193,18 +201,14 @@ elif st.session_state.gastro_step == 3:
         cols = st.columns(2)
         with cols[0]:
             if st.button("🌊 Niterói", key="city_niteroi", use_container_width=True):
-                cidade = "Niterói"
-                prompt_completo = f"Recomende restaurantes de culinária {st.session_state.selected_culinaria} com faixa de preço {st.session_state.selected_preco} em {cidade}."
-                st.session_state.messages.append({"role": "user", "content": prompt_completo})
-                st.session_state.gastro_step = 0
+                prompt = f"Recomende restaurantes de culinária {st.session_state.selected_culinaria} com faixa de preço {st.session_state.selected_preco} em Niterói."
+                send_user_message(prompt)
                 st.rerun()
 
         with cols[1]:
             if st.button("🏙️ Rio de Janeiro", key="city_rio", use_container_width=True):
-                cidade = "Rio de Janeiro"
-                prompt_completo = f"Recomende restaurantes de culinária {st.session_state.selected_culinaria} com faixa de preço {st.session_state.selected_preco} no {cidade}."
-                st.session_state.messages.append({"role": "user", "content": prompt_completo})
-                st.session_state.gastro_step = 0
+                prompt = f"Recomende restaurantes de culinária {st.session_state.selected_culinaria} com faixa de preço {st.session_state.selected_preco} no Rio de Janeiro."
+                send_user_message(prompt)
                 st.rerun()
 
         st.divider()
@@ -215,31 +219,13 @@ elif st.session_state.gastro_step == 3:
 st.divider()
 
 # ---------------------------------------------------------
-# HISTÓRICO DE CONVERSA E EXECUÇÃO DA REQUISIÇÃO
+# EXIBIÇÃO DO HISTÓRICO DE CHAT
 # ---------------------------------------------------------
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-# Processa a última mensagem enviada pelo usuário
-if st.session_state.messages and st.session_state.messages[-1]["role"] == "user":
-    last_user_msg = st.session_state.messages[-1]["content"]
-    
-    # Verifica se a última mensagem do histórico já foi respondida
-    already_responded = (
-        len(st.session_state.messages) > 1 and 
-        st.session_state.messages[-1]["role"] == "assistant"
-    )
-    
-    if not already_responded:
-        with st.chat_message("assistant"):
-            with st.spinner("Consultando recomendações de lazer..."):
-                bot_reply = detect_intent(last_user_msg)
-                st.markdown(bot_reply)
-                st.session_state.messages.append({"role": "assistant", "content": bot_reply})
-                st.rerun()
-
-# Campo de entrada de texto manual livre
+# Entrada de texto livre no rodapé
 if user_input := st.chat_input("Ou digite uma busca específica..."):
-    st.session_state.messages.append({"role": "user", "content": user_input})
+    send_user_message(user_input)
     st.rerun()

@@ -13,9 +13,6 @@ st.set_page_config(
     layout="wide"
 )
 
-# ---------------------------------------------------------
-# CONFIGURAÇÕES DO AGENTE NA GOOGLE CLOUD
-# ---------------------------------------------------------
 PROJECT_ID = "curador-lazer-app"
 LOCATION = "us-central1"
 AGENT_ID = "eae9afb0-e7fa-49f0-9f4d-04e73002bc47"
@@ -35,7 +32,6 @@ def get_dialogflow_client():
         else:
             service_account_info = dict(secret_content)
 
-        # Autenticação oficial com escopo do Google Cloud
         credentials = service_account.Credentials.from_service_account_info(
             service_account_info,
             scopes=["https://www.googleapis.com/auth/cloud-platform"]
@@ -98,7 +94,7 @@ if "selected_preco" not in st.session_state:
     st.session_state.selected_preco = None
 
 # ---------------------------------------------------------
-# FUNÇÃO AUXILIAR PARA ENVIAR MENSAGENS E OBTER RESPOSTA
+# FUNÇÃO AUXILIAR PARA ENVIAR MENSAGENS
 # ---------------------------------------------------------
 def send_user_message(prompt):
     st.session_state.messages.append({"role": "user", "content": prompt})
@@ -157,7 +153,7 @@ elif st.session_state.gastro_step == 1:
         culinarias = [
             "Italiana", "Japonesa", "Chinesa", "Peruana", 
             "Árabe", "Brasileira", "Asiática em geral", 
-            "Hamburgueria", "Pizzaria", "Outras"
+            "Hamburgueria", "Pizzaria / Parrilla", "Outras"
         ]
         
         cols = st.columns(5)

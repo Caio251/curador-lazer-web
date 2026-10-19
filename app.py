@@ -172,6 +172,32 @@ def fetch_tmdb_movies(mode: str, month_offset: int = 0, _cache_date: str = "") -
 # GOOGLE PLACES (NEW) — BUSCA GASTRONÔMICA
 # Sem cache ou armazenamento persistente de dados do Places.
 # ---------------------------------------------------------
+# Validação conservadora do endereço retornado pelo Google Places.
+# "Região Oceânica" não é bairro administrativo: corresponde a vários bairros.
+BAIRROS_REGIAO_OCEANICA = (
+    "Itaipu", "Itacoatiara", "Piratininga", "Camboinhas", "Engenho do Mato",
+    "Serra Grande", "Maravista", "Santo Antônio", "Jacaré", "Cafubá"
+)
+
+
+def endereco_na_regiao(endereco: str, cidade: str, bairro: str) -> bool:
+    """Aceita apenas endereços que mencionem cidade e bairro explicitamente.
+
+    É um filtro conservador por texto, não uma verificação de limites oficiais.
+    """
+    if not endereco or endereco == "Endereço indisponível":
+        return False
+    e = normalizar(endereco)
+    if normalizar(cidade) not in e:
+        return False
+    if bairro == "Qualquer Bairro":
+        return True
+    if bairro == "Região Oceânica":
+        return any(normalizar(b) in e for b in BAIRROS_REGIAO_OCEANICA)
+    # Evita correspondências parciais como 'Leme' dentro de outra palavra.
+    return bool(re.search(r"(?<!\w)" + re.escape(normalizar(bairro)) + r"(?!\w)", e))
+
+
 def fetch_places(cidade: str, bairro: str, culinaria: str):
     if not GOOGLE_PLACES_API_KEY:
         return None, "A chave GOOGLE_PLACES_API_KEY não está configurada nos Secrets."
@@ -252,13 +278,18 @@ def pesquisar_restaurantes(cidade, bairro, culinaria, preco_label="Não informad
     if error:
         st.session_state.messages.append({"role": "assistant", "content": f"⚠️ {error}"})
         return
-    escolhidos = escolher_restaurantes(places, anteriores)
+    # Não relaxar silenciosamente o bairro: resultados sem endereço comprovável
+    # são excluídos. A API pode retornar locais de bairros vizinhos.
+    places_validos = [p for p in places if endereco_na_regiao(p["endereco"], cidade, bairro)]
+    excluidos = len(places) - len(places_validos)
+    escolhidos = escolher_restaurantes(places_validos, anteriores)
     st.session_state.last_place_filters = filtros
     st.session_state.last_place_ids = [p["id"] for p in escolhidos]
     st.session_state.messages.append({
         "role": "assistant", "kind": "places", "places": escolhidos,
         **filtros,
-        "total_candidatos": len(places),
+        "total_candidatos": len(places_validos),
+        "total_excluidos": excluidos,
     })
 
 
@@ -369,14 +400,13 @@ def send_user_message(prompt):
             st.session_state.messages.append({"role": "user", "content": prompt})
             st.session_state.messages.append({"role": "assistant", "content":
                 "Para pesquisar restaurantes reais, informe a cidade (Rio de Janeiro ou Niterói) e, se desejar, o bairro."})
-        else:            
+        else:
             pesquisar_restaurantes(
                 cidade=filtros["cidade"],
                 bairro=filtros["bairro"],
                 culinaria=filtros["culinaria"],
                 preco_label=filtros.get("preco", "Não informado"),
-)
-
+            )
     else:
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.spinner("Consultando recomendações..."):
@@ -636,7 +666,7 @@ with st.container(height=420, border=True):
                 st.caption(f"Busca: {msg['culinaria']} · {msg['bairro']} · {msg['cidade']}")
                 st.caption("O preço não foi validado. Confirme localização, funcionamento e valores antes de visitar.")
                 if not msg["places"]:
-                    st.info("Nenhum restaurante encontrado para essa pesquisa.")
+                    st.info("Não encontrei restaurantes cujo endereço confirme a região escolhida. Tente outro bairro ou 'Qualquer Bairro'.")
                 for place in msg["places"]:
                     with st.container(border=True):
                         st.markdown(f"**{place['nome']}**")
@@ -651,6 +681,7 @@ with st.container(height=420, border=True):
                     if st.button("Surpreenda-me novamente", key=f"repeat_{idx}"):
                         pesquisar_restaurantes(msg["cidade"], msg["bairro"], msg["culinaria"], msg["preco"], repetir=True)
                         st.rerun()
-                st.caption("Dados: Google Maps. Alguns locais podem estar fora do bairro solicitado.")
+                st.caption(f"Dados: Google Maps. {msg.get('total_excluidos', 0)} resultado(s) descartado(s) por não confirmar a região no endereço.")
+                st.caption("Filtro geográfico conservador por endereço; não equivale a limites oficiais de bairros. O Google pode omitir o bairro no endereço de locais válidos.")
             else:
                 st.markdown(msg["content"])

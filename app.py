@@ -4,6 +4,9 @@ import uuid
 import requests
 import logging
 import os
+import re
+import random
+import unicodedata
 from zoneinfo import ZoneInfo
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
@@ -179,7 +182,7 @@ def fetch_places(cidade: str, bairro: str, culinaria: str):
         "textQuery": f"{termo} em {local}, RJ, Brasil",
         "languageCode": "pt-BR",
         "regionCode": "BR",
-        "pageSize": 8,
+        "pageSize": 20,
         "includedType": "restaurant",
         "strictTypeFiltering": False,
     }
@@ -221,23 +224,107 @@ def fetch_places(cidade: str, bairro: str, culinaria: str):
         return None, "Não foi possível consultar os restaurantes. Verifique a API, a chave, o faturamento e os logs."
 
 
-def search_gastronomia(preco_label: str):
-    cidade = st.session_state.gastro_cidade
-    bairro = st.session_state.gastro_bairro
-    culinaria = st.session_state.gastro_culinaria
-    descricao = f"Restaurantes de culinária {culinaria} em {bairro if bairro != 'Qualquer Bairro' else cidade} ({cidade})"
-    st.session_state.messages.append({"role": "user", "content": descricao})
+def escolher_restaurantes(candidatos, anteriores=(), quantidade=3):
+    """Sorteia sem reposição; evita a seleção anterior quando possível."""
+    unicos = list({p["id"]: p for p in candidatos if p.get("id")}.values())
+    anteriores = set(anteriores)
+    novos = [p for p in unicos if p["id"] not in anteriores]
+    rng = random.SystemRandom()
+    if len(novos) >= quantidade:
+        return rng.sample(novos, quantidade)
+    # Prioriza inéditos, mas completa a lista quando a base é pequena.
+    selecionados = rng.sample(novos, len(novos))
+    restantes = [p for p in unicos if p["id"] in anteriores]
+    selecionados.extend(rng.sample(restantes, min(quantidade - len(selecionados), len(restantes))))
+    return selecionados
+
+
+def pesquisar_restaurantes(cidade, bairro, culinaria, preco_label="Não informado", repetir=False):
+    """Fluxo único para o menu, a busca livre e o botão de nova seleção."""
+    filtros = {"cidade": cidade, "bairro": bairro, "culinaria": culinaria, "preco": preco_label}
+    anteriores = st.session_state.get("last_place_ids", []) if st.session_state.get("last_place_filters") == filtros else []
+    st.session_state.messages.append({"role": "user", "content": (
+        "Surpreenda-me novamente com outros restaurantes" if repetir else
+        f"Restaurantes de culinária {culinaria} em {bairro if bairro != 'Qualquer Bairro' else cidade} ({cidade})"
+    )})
     with st.spinner("Consultando restaurantes no Google Places..."):
         places, error = fetch_places(cidade, bairro, culinaria)
     if error:
         st.session_state.messages.append({"role": "assistant", "content": f"⚠️ {error}"})
-    else:
-        st.session_state.messages.append({
-            "role": "assistant", "kind": "places", "places": places,
-            "cidade": cidade, "bairro": bairro, "culinaria": culinaria,
-            "preco": preco_label,
-        })
+        return
+    escolhidos = escolher_restaurantes(places, anteriores)
+    st.session_state.last_place_filters = filtros
+    st.session_state.last_place_ids = [p["id"] for p in escolhidos]
+    st.session_state.messages.append({
+        "role": "assistant", "kind": "places", "places": escolhidos,
+        **filtros,
+        "total_candidatos": len(places),
+    })
+
+
+def search_gastronomia(preco_label: str):
+    pesquisar_restaurantes(st.session_state.gastro_cidade, st.session_state.gastro_bairro,
+                           st.session_state.gastro_culinaria, preco_label)
     reset_flow()
+
+
+def normalizar(texto):
+    return "".join(c for c in unicodedata.normalize("NFD", texto.lower())
+                   if unicodedata.category(c) != "Mn")
+
+
+BAIRROS_RIO = ["Aterro do Flamengo", "Botafogo", "Catete", "Copacabana", "Gávea",
+               "Glória", "Humaitá", "Ipanema", "Jardim Botânico", "Lagoa",
+               "Laranjeiras", "Leblon", "Leme"]
+BAIRROS_NIT = ["Centro", "Icaraí", "Ingá", "Região Oceânica", "São Francisco"]
+CULINARIAS = ["Italiana", "Japonesa", "Chinesa", "Peruana", "Árabe", "Brasileira",
+             "Asiática em geral", "Hamburgueria", "Pizzaria"]
+
+
+def extrair_filtros_gastronomia(texto, filtros_anteriores=None):
+    """Roteamento conservador: não supõe cidade para pedidos sem contexto."""
+    t = normalizar(texto)
+    anterior = filtros_anteriores or {}
+    contexto = bool(anterior)
+    repeticao = bool(re.search(r"\b(outro|outra|outros|outras|novamente|mais opcoes|surpreenda)\b", t))
+    palavras = ("restaurante", "comer", "jantar", "almocar", "almoco", "gastronomia",
+                "culinaria", "hamburguer", "pizza", "sushi", "sushis", "rodizio")
+    culinaria = next((c for c in CULINARIAS if normalizar(c) in t), None)
+    if "japones" in t or "japonesa" in t or "sushi" in t:
+        culinaria = "Japonesa"
+    elif "italiano" in t or "italiana" in t:
+        culinaria = "Italiana"
+    elif "chines" in t or "chinesa" in t:
+        culinaria = "Chinesa"
+    elif "arabe" in t:
+        culinaria = "Árabe"
+    elif "hamburguer" in t:
+        culinaria = "Hamburgueria"
+    elif "pizza" in t:
+        culinaria = "Pizzaria"
+    eh_gastro = any(p in t for p in palavras) or bool(culinaria) or (contexto and repeticao)
+    if not eh_gastro:
+        return None
+    cidade = None
+    if "niteroi" in t:
+        cidade = "Niterói"
+    elif "rio de janeiro" in t or "carioca" in t:
+        cidade = "Rio de Janeiro"
+    bairro = None
+    for b in BAIRROS_RIO + BAIRROS_NIT:
+        if normalizar(b) in t:
+            bairro = b
+            if not cidade:
+                cidade = ("Niterói" if b in BAIRROS_NIT and b != "Centro" else
+                          None if b == "Centro" else "Rio de Janeiro")
+            break
+    cidade = cidade or anterior.get("cidade")
+    bairro = bairro or (anterior.get("bairro") if cidade == anterior.get("cidade") else "Qualquer Bairro")
+    culinaria = culinaria or anterior.get("culinaria") or "Outras"
+    if not cidade:
+        return {"needs_city": True, "culinaria": culinaria}
+    return {"cidade": cidade, "bairro": bairro or "Qualquer Bairro", "culinaria": culinaria,
+            "preco": anterior.get("preco", "Não informado")}
 
 
 # ---------------------------------------------------------
@@ -263,6 +350,8 @@ if "gastro_culinaria" not in st.session_state:
 def clear_conversation():
     st.session_state.messages = []
     st.session_state.session_id = str(uuid.uuid4())
+    st.session_state.last_place_filters = None
+    st.session_state.last_place_ids = []
     reset_flow()
 
 
@@ -274,11 +363,20 @@ def reset_flow():
     st.session_state.gastro_culinaria = None
 
 def send_user_message(prompt):
-    st.session_state.messages.append({"role": "user", "content": prompt})
+    filtros = extrair_filtros_gastronomia(prompt, st.session_state.get("last_place_filters"))
+    if filtros:
+        if filtros.get("needs_city"):
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            st.session_state.messages.append({"role": "assistant", "content":
+                "Para pesquisar restaurantes reais, informe a cidade (Rio de Janeiro ou Niterói) e, se desejar, o bairro."})
+        else:
+            pesquisar_restaurantes(**filtros)
+    else:
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.spinner("Consultando recomendações..."):
+            bot_reply = detect_intent(prompt)
+            st.session_state.messages.append({"role": "assistant", "content": bot_reply})
     reset_flow()
-    with st.spinner("Consultando recomendações..."):
-        bot_reply = detect_intent(prompt)
-        st.session_state.messages.append({"role": "assistant", "content": bot_reply})
 
 # ---------------------------------------------------------
 # BARRA LATERAL (SIDEBAR)
@@ -294,6 +392,15 @@ with st.sidebar:
 # ---------------------------------------------------------
 st.title("🎭 Curador de Lazer e Cultura")
 st.caption("Escolha uma opção nos cartões abaixo ou monte seu filtro personalizado:")
+
+# Campo inline: evita que o chat fixo no rodapé provoque saltos de rolagem.
+with st.container():
+    with st.form("busca_livre_form", clear_on_submit=True):
+        entrada_livre = st.text_input("Busca livre", placeholder="Ex.: restaurantes japoneses em Botafogo")
+        enviar = st.form_submit_button("Pesquisar")
+    if enviar and entrada_livre.strip():
+        send_user_message(entrada_livre.strip())
+        st.rerun()
 
 # MENU PRINCIPAL (ETAPA 0)
 if st.session_state.current_step == 0:
@@ -513,31 +620,31 @@ elif st.session_state.active_flow == "gastronomia":
 
 st.divider()
 
-# ---------------------------------------------------------
-# HISTÓRICO DE MENSAGENS E BUSCA LIVRE
-# ---------------------------------------------------------
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        if msg.get("kind") == "places":
-            st.markdown("**Restaurantes encontrados no Google Places**")
-            st.caption(f"Busca: {msg['culinaria']} · {msg['bairro']} · {msg['cidade']}")
-            st.caption("A preferência de preço não foi validada. Confirme bairro, funcionamento e valores antes de visitar.")
-            if not msg["places"]:
-                st.info("Nenhum restaurante encontrado para essa pesquisa.")
-            for place in msg["places"]:
-                with st.container(border=True):
-                    st.markdown(f"**{place['nome']}**")
-                    st.write(place["endereco"])
-                    if place["avaliacao"] is not None:
-                        st.write(f"Avaliação Google: {place['avaliacao']}/5 · {place['total_avaliacoes'] or 0} avaliações")
-                    if place["situacao"] == "CLOSED_TEMPORARILY":
-                        st.warning("Marcado como temporariamente fechado")
-                    if place["maps_url"]:
-                        st.link_button("Ver no Google Maps", place["maps_url"])
-            st.caption("Dados de estabelecimentos: Google Maps. Resultados podem incluir locais fora do bairro solicitado.")
-        else:
-            st.markdown(msg["content"])
-
-if user_input := st.chat_input("Ou digite uma busca específica..."):
-    send_user_message(user_input)
-    st.rerun()
+# Histórico em região delimitada, sem chat_input fixo no rodapé.
+st.subheader("Histórico de recomendações")
+with st.container(height=420, border=True):
+    for idx, msg in enumerate(st.session_state.messages):
+        with st.chat_message(msg["role"]):
+            if msg.get("kind") == "places":
+                st.markdown("**Três sugestões sorteadas do Google Places**")
+                st.caption(f"Busca: {msg['culinaria']} · {msg['bairro']} · {msg['cidade']}")
+                st.caption("O preço não foi validado. Confirme localização, funcionamento e valores antes de visitar.")
+                if not msg["places"]:
+                    st.info("Nenhum restaurante encontrado para essa pesquisa.")
+                for place in msg["places"]:
+                    with st.container(border=True):
+                        st.markdown(f"**{place['nome']}**")
+                        st.write(place["endereco"])
+                        if place["avaliacao"] is not None:
+                            st.write(f"Avaliação Google: {place['avaliacao']}/5 · {place['total_avaliacoes'] or 0} avaliações")
+                        if place["situacao"] == "CLOSED_TEMPORARILY":
+                            st.warning("Marcado como temporariamente fechado")
+                        if place["maps_url"]:
+                            st.link_button("Ver no Google Maps", place["maps_url"])
+                if idx == len(st.session_state.messages) - 1 and msg["places"]:
+                    if st.button("Surpreenda-me novamente", key=f"repeat_{idx}"):
+                        pesquisar_restaurantes(msg["cidade"], msg["bairro"], msg["culinaria"], msg["preco"], repetir=True)
+                        st.rerun()
+                st.caption("Dados: Google Maps. Alguns locais podem estar fora do bairro solicitado.")
+            else:
+                st.markdown(msg["content"])

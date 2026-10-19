@@ -29,6 +29,13 @@ TMDB_GENRES = {
     53: "Thriller", 10752: "Guerra", 37: "Faroeste"
 }
 
+# Mapeamento de meses em português
+MESES_PT = {
+    1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril",
+    5: "Maio", 6: "Junho", 7: "Julho", 8: "Agosto",
+    9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro"
+}
+
 # ---------------------------------------------------------
 # AUTENTICAÇÃO E CLIENTE DIALOGFLOW CX
 # ---------------------------------------------------------
@@ -83,7 +90,7 @@ def detect_intent(text_prompt):
         return f"⚠️ Erro ao consultar o Dialogflow CX: {e}"
 
 # ---------------------------------------------------------
-# CONSULTA DE FILMES NO TMDB (SINOPSES INTEGRAIS)
+# CONSULTA DE FILMES NO TMDB (V3.0 COM PÔSTERES E EXCEÇÕES)
 # ---------------------------------------------------------
 def fetch_tmdb_movies(mode: str, month_offset: int = 0) -> str:
     if not TMDB_API_KEY:
@@ -123,16 +130,25 @@ def fetch_tmdb_movies(mode: str, month_offset: int = 0) -> str:
         out = []
         for m in results:
             title = m.get("title", "Sem título")
-            overview = m.get("overview") or "Sinopse não disponível em português."
+            
+            # Tratamento de sinopse vazia ou espaços em branco
+            overview_raw = m.get("overview", "")
+            overview = overview_raw.strip() if overview_raw and overview_raw.strip() else "Sinopse não disponível em português."
+            
             genre_ids = m.get("genre_ids", [])
             genres = [TMDB_GENRES.get(g_id, "Outros") for g_id in genre_ids]
             genre_str = ", ".join(genres) if genres else "Não informado"
+            
+            poster_path = m.get("poster_path")
+            poster_markdown = f"![Pôster](https://image.tmdb.org/t/p/w185{poster_path})\n\n" if poster_path else ""
 
-            out.append(f"🎬 **{title}**\n* **Gênero:** {genre_str}\n* **Sinopse:** _{overview}_\n")
+            out.append(f"{poster_markdown}🎬 **{title}**\n* **Gênero:** {genre_str}\n* **Sinopse:** _{overview}_\n")
 
         return "\n---\n".join(out)
-    except Exception as e:
-        return f"⚠️ Falha na comunicação com TMDB: {e}"
+    except requests.exceptions.Timeout:
+        return "⚠️ A consulta ao TMDB demorou muito para responder. Tente novamente em instantes."
+    except requests.exceptions.RequestException as e:
+        return f"⚠️ Falha de conexão com o serviço de filmes: {e}"
 
 # ---------------------------------------------------------
 # ESTADO DA SESSÃO E REINICIALIZAÇÃO
@@ -167,6 +183,16 @@ def send_user_message(prompt):
     with st.spinner("Consultando recomendações..."):
         bot_reply = detect_intent(prompt)
         st.session_state.messages.append({"role": "assistant", "content": bot_reply})
+
+# ---------------------------------------------------------
+# BARRA LATERAL (SIDEBAR)
+# ---------------------------------------------------------
+with st.sidebar:
+    st.header("⚙️ Opções")
+    if st.button("🗑️ Limpar Conversa", use_container_width=True):
+        st.session_state.messages = []
+        reset_flow()
+        st.rerun()
 
 # ---------------------------------------------------------
 # INTERFACE PRINCIPAL
@@ -254,9 +280,13 @@ elif st.session_state.active_flow == "cultura":
             st.subheader("📅 Passo 3 de 3: Escolha o mês das estreias")
             
             dt_now = datetime.now()
-            m1 = dt_now.strftime("%B/%Y").capitalize()
-            m2 = (dt_now + relativedelta(months=1)).strftime("%B/%Y").capitalize()
-            m3 = (dt_now + relativedelta(months=2)).strftime("%B/%Y").capitalize()
+            dt_m2 = dt_now + relativedelta(months=1)
+            dt_m3 = dt_now + relativedelta(months=2)
+
+            # Nomes dos meses garantidos em Português
+            m1 = f"{MESES_PT[dt_now.month]}/{dt_now.year}"
+            m2 = f"{MESES_PT[dt_m2.month]}/{dt_m2.year}"
+            m3 = f"{MESES_PT[dt_m3.month]}/{dt_m3.year}"
 
             cols = st.columns(3)
             with cols[0]:

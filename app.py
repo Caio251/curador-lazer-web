@@ -20,7 +20,7 @@ LOCATION = "us-central1"
 AGENT_ID = "eae9afb0-e7fa-49f0-9f4d-04e73002bc47"
 TMDB_API_KEY = st.secrets.get("TMDB_API_KEY", "")
 
-# Dicionário de tradução de Gêneros do TMDB
+# Mapeamento e tradução de Gêneros do TMDB
 TMDB_GENRES = {
     28: "Ação", 12: "Aventura", 16: "Animação", 35: "Comédia", 80: "Crime",
     99: "Documentário", 18: "Drama", 10751: "Família", 14: "Fantasia",
@@ -30,7 +30,7 @@ TMDB_GENRES = {
 }
 
 # ---------------------------------------------------------
-# CLIENTE DIALOGFLOW
+# AUTENTICAÇÃO E CLIENTE DIALOGFLOW CX
 # ---------------------------------------------------------
 @st.cache_resource
 def get_dialogflow_client():
@@ -75,15 +75,15 @@ def detect_intent(text_prompt):
         
         bot_responses = []
         for message in response.query_result.response_messages:
-            if message.text.text:
+            if message.text and message.text.text:
                 bot_responses.extend(message.text.text)
                 
-        return "\n\n".join(bot_responses) if bot_responses else "Não encontrei opções disponíveis no momento."
+        return "\n\n".join(bot_responses) if bot_responses else "Não encontrei opções disponíveis no momento para essa busca."
     except Exception as e:
         return f"⚠️ Erro ao consultar o Dialogflow CX: {e}"
 
 # ---------------------------------------------------------
-# CONSULTA DE FILMES NO TMDB
+# CONSULTA DE FILMES NO TMDB (SINOPSES INTEGRAIS)
 # ---------------------------------------------------------
 def fetch_tmdb_movies(mode: str, month_offset: int = 0) -> str:
     if not TMDB_API_KEY:
@@ -94,11 +94,9 @@ def fetch_tmdb_movies(mode: str, month_offset: int = 0) -> str:
     if mode == "cartaz":
         url = "https://api.themoviedb.org/3/movie/now_playing"
         params = {"api_key": TMDB_API_KEY, "language": "pt-BR", "region": "BR", "page": 1}
-    else: # Estreias por Mês
+    else:
         target_month = today + relativedelta(months=month_offset)
         start_date = target_month.replace(day=1).strftime("%Y-%m-%d")
-        
-        # Último dia do mês alvo
         next_month_first = (target_month + relativedelta(months=1)).replace(day=1)
         end_date = (next_month_first - relativedelta(days=1)).strftime("%Y-%m-%d")
 
@@ -125,13 +123,10 @@ def fetch_tmdb_movies(mode: str, month_offset: int = 0) -> str:
         out = []
         for m in results:
             title = m.get("title", "Sem título")
-            overview = m.get("overview", "Sinopse não disponível em português.")
+            overview = m.get("overview") or "Sinopse não disponível em português."
             genre_ids = m.get("genre_ids", [])
             genres = [TMDB_GENRES.get(g_id, "Outros") for g_id in genre_ids]
             genre_str = ", ".join(genres) if genres else "Não informado"
-
-            if len(overview) > 160:
-                overview = overview[:157] + "..."
 
             out.append(f"🎬 **{title}**\n* **Gênero:** {genre_str}\n* **Sinopse:** _{overview}_\n")
 
@@ -140,7 +135,7 @@ def fetch_tmdb_movies(mode: str, month_offset: int = 0) -> str:
         return f"⚠️ Falha na comunicação com TMDB: {e}"
 
 # ---------------------------------------------------------
-# ESTADO DA SESSÃO
+# ESTADO DA SESSÃO E REINICIALIZAÇÃO
 # ---------------------------------------------------------
 if "messages" not in st.session_state:
     st.session_state.messages = []
@@ -152,7 +147,6 @@ if "active_flow" not in st.session_state:
 if "current_step" not in st.session_state:
     st.session_state.current_step = 0
 
-# Variáveis do fluxo de Gastronomia
 if "gastro_cidade" not in st.session_state:
     st.session_state.gastro_cidade = None
 if "gastro_bairro" not in st.session_state:
@@ -222,7 +216,6 @@ if st.session_state.current_step == 0:
 # FLUXO DE CULTURA & ARTE (CINEMA)
 # ---------------------------------------------------------
 elif st.session_state.active_flow == "cultura":
-    # Passo 1: Seleção de Categoria (Cinema)
     if st.session_state.current_step == 1:
         with st.container(border=True):
             st.subheader("🎭 Cultura & Arte - Passo 1 de 3")
@@ -234,7 +227,6 @@ elif st.session_state.active_flow == "cultura":
                 reset_flow()
                 st.rerun()
 
-    # Passo 2: Cartaz ou Estreias
     elif st.session_state.current_step == 2:
         with st.container(border=True):
             st.subheader("🎬 Passo 2 de 3: Escolha o tipo de programação")
@@ -257,12 +249,10 @@ elif st.session_state.active_flow == "cultura":
                 st.session_state.current_step = 1
                 st.rerun()
 
-    # Passo 3: Escolha do Mês para Estreias
     elif st.session_state.current_step == 3:
         with st.container(border=True):
             st.subheader("📅 Passo 3 de 3: Escolha o mês das estreias")
             
-            # Cálculo dos meses dinâmicos
             dt_now = datetime.now()
             m1 = dt_now.strftime("%B/%Y").capitalize()
             m2 = (dt_now + relativedelta(months=1)).strftime("%B/%Y").capitalize()
@@ -299,10 +289,9 @@ elif st.session_state.active_flow == "cultura":
                 st.rerun()
 
 # ---------------------------------------------------------
-# FLUXO DE GASTRONOMIA (4 ETAPAS COM BAIRROS ORDENADOS)
+# FLUXO DE GASTRONOMIA (4 ETAPAS COM BAIRROS)
 # ---------------------------------------------------------
 elif st.session_state.active_flow == "gastronomia":
-    # Passo 1: Cidade
     if st.session_state.current_step == 1:
         with st.container(border=True):
             st.subheader("🍣 Gastronomia - Passo 1 de 4: Escolha a cidade")
@@ -323,19 +312,18 @@ elif st.session_state.active_flow == "gastronomia":
                 reset_flow()
                 st.rerun()
 
-    # Passo 2: Região / Bairro (Ordenados Alfabeticamente)
     elif st.session_state.current_step == 2:
         with st.container(border=True):
             st.subheader(f"📍 Passo 2 de 4: Escolha o bairro em {st.session_state.gastro_cidade}")
 
             if st.session_state.gastro_cidade == "Rio de Janeiro":
                 bairros = [
-                    "Aterro do Flamengo", "Botafogo", "Catete", "Copacabana", 
+                    "Qualquer Bairro", "Aterro do Flamengo", "Botafogo", "Catete", "Copacabana", 
                     "Gávea", "Glória", "Humaitá", "Ipanema", "Jardim Botânico", 
                     "Lagoa", "Laranjeiras", "Leblon", "Leme"
                 ]
             else:
-                bairros = ["Centro", "Icaraí", "Ingá", "Região Oceânica", "São Francisco"]
+                bairros = ["Qualquer Bairro", "Centro", "Icaraí", "Ingá", "Região Oceânica", "São Francisco"]
 
             cols = st.columns(4)
             for i, b in enumerate(bairros):
@@ -350,10 +338,10 @@ elif st.session_state.active_flow == "gastronomia":
                 st.session_state.current_step = 1
                 st.rerun()
 
-    # Passo 3: Opções de Culinária (Sem Parrilla e Churrasco)
     elif st.session_state.current_step == 3:
         with st.container(border=True):
-            st.subheader(f"🍽️ Passo 3 de 4: Escolha a culinária em {st.session_state.gastro_bairro}")
+            bairro_txt = f"em {st.session_state.gastro_bairro}" if st.session_state.gastro_bairro != "Qualquer Bairro" else f"em {st.session_state.gastro_cidade}"
+            st.subheader(f"🍽️ Passo 3 de 4: Escolha a culinária {bairro_txt}")
 
             culinarias = [
                 "Italiana", "Japonesa", "Chinesa", "Peruana", 
@@ -374,10 +362,9 @@ elif st.session_state.active_flow == "gastronomia":
                 st.session_state.current_step = 2
                 st.rerun()
 
-    # Passo 4: Faixa de Preço e Disparo para o Dialogflow CX
     elif st.session_state.current_step == 4:
         with st.container(border=True):
-            st.subheader(f"💰 Passo 4 de 4: Faixa de preço para culinária {st.session_state.gastro_culinaria} ({st.session_state.gastro_bairro})")
+            st.subheader(f"💰 Passo 4 de 4: Faixa de preço ({st.session_state.gastro_culinaria})")
 
             precos = [
                 ("$", "Econômico ($)"),
@@ -390,7 +377,11 @@ elif st.session_state.active_flow == "gastronomia":
             for i, (simbolo, rotulo) in enumerate(precos):
                 with cols[i]:
                     if st.button(rotulo, key=f"p_{i}", use_container_width=True):
-                        prompt = f"Recomende restaurantes de culinária {st.session_state.gastro_culinaria} com faixa de preço {simbolo} no bairro {st.session_state.gastro_bairro}, {st.session_state.gastro_cidade}."
+                        if st.session_state.gastro_bairro == "Qualquer Bairro":
+                            prompt = f"Recomende restaurantes de culinária {st.session_state.gastro_culinaria} com faixa de preço {simbolo} em {st.session_state.gastro_cidade}."
+                        else:
+                            prompt = f"Recomende restaurantes de culinária {st.session_state.gastro_culinaria} com faixa de preço {simbolo} em {st.session_state.gastro_cidade}, de preferência na região de {st.session_state.gastro_bairro}."
+                        
                         send_user_message(prompt)
                         st.rerun()
 
@@ -402,7 +393,7 @@ elif st.session_state.active_flow == "gastronomia":
 st.divider()
 
 # ---------------------------------------------------------
-# EXIBIÇÃO DO CHAT E INPUT LIVRE
+# HISTÓRICO DE MENSAGENS E BUSCA LIVRE
 # ---------------------------------------------------------
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):

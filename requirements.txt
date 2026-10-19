@@ -1,3 +1,4 @@
 streamlit
-google-cloud-dialogflow-cx==1.16.0
 requests
+python-dateutil
+google-cloud-dialogflow-cx

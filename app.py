@@ -2,6 +2,9 @@ import streamlit as st
 import json
 import uuid
 import requests
+import logging
+import os
+from zoneinfo import ZoneInfo
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from google.cloud import dialogflowcx_v3 as dialogflow
@@ -19,6 +22,11 @@ PROJECT_ID = "curador-lazer-app"
 LOCATION = "us-central1"
 AGENT_ID = "eae9afb0-e7fa-49f0-9f4d-04e73002bc47"
 TMDB_API_KEY = st.secrets.get("TMDB_API_KEY", "")
+TIMEZONE = ZoneInfo("America/Sao_Paulo")
+logger = logging.getLogger("curador_lazer")
+if not logger.handlers:
+    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
+
 
 # Mapeamento e tradução de Gêneros do TMDB
 TMDB_GENRES = {
@@ -54,8 +62,9 @@ def get_dialogflow_client():
             client_options=client_options
         )
         return client, None
-    except Exception as e:
-        return None, f"Erro ao criar credenciais GCP: {e}"
+    except Exception:
+        logger.exception("Falha na inicialização do cliente Dialogflow")
+        return None, "Não foi possível conectar ao serviço de recomendações."
 
 def detect_intent(text_prompt):
     session_client, err_msg = get_dialogflow_client()
@@ -86,17 +95,23 @@ def detect_intent(text_prompt):
                 bot_responses.extend(message.text.text)
                 
         return "\n\n".join(bot_responses) if bot_responses else "Não encontrei opções disponíveis no momento para essa busca."
-    except Exception as e:
-        return f"⚠️ Erro ao consultar o Dialogflow CX: {e}"
+    except Exception:
+        logger.exception("Falha na consulta ao Dialogflow")
+        return "⚠️ Não foi possível consultar as recomendações agora. Tente novamente."
 
 # ---------------------------------------------------------
 # CONSULTA DE FILMES NO TMDB (V3.0 COM PÔSTERES E EXCEÇÕES)
 # ---------------------------------------------------------
-def fetch_tmdb_movies(mode: str, month_offset: int = 0) -> str:
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_tmdb_movies(mode: str, month_offset: int = 0, _cache_date: str = "") -> str:
+    # _cache_date evita reutilizar resultados de outro dia no cache.
     if not TMDB_API_KEY:
-        return "⚠️ Chave de API do TMDB não configurada nos Secrets."
+        logger.error("TMDB_API_KEY ausente")
+        return "⚠️ Serviço de filmes indisponível no momento."
+    if mode not in ("cartaz", "estreias") or month_offset not in (0, 1, 2):
+        return "⚠️ Filtro de cinema inválido."
 
-    today = datetime.now()
+    today = datetime.now(TIMEZONE)
 
     if mode == "cartaz":
         url = "https://api.themoviedb.org/3/movie/now_playing"
@@ -120,9 +135,7 @@ def fetch_tmdb_movies(mode: str, month_offset: int = 0) -> str:
 
     try:
         response = requests.get(url, params=params, timeout=10)
-        if response.status_code != 200:
-            return f"⚠️ Erro ao consultar TMDB (Status {response.status_code})."
-
+        response.raise_for_status()
         results = response.json().get("results", [])[:6]
         if not results:
             return "Nenhum filme encontrado para o período selecionado."
@@ -147,8 +160,9 @@ def fetch_tmdb_movies(mode: str, month_offset: int = 0) -> str:
         return "\n---\n".join(out)
     except requests.exceptions.Timeout:
         return "⚠️ A consulta ao TMDB demorou muito para responder. Tente novamente em instantes."
-    except requests.exceptions.RequestException as e:
-        return f"⚠️ Falha de conexão com o serviço de filmes: {e}"
+    except (requests.exceptions.RequestException, ValueError, TypeError, AttributeError):
+        logger.exception("Falha na consulta ou interpretação dos dados TMDB")
+        return "⚠️ Não foi possível consultar os filmes agora. Tente novamente."
 
 # ---------------------------------------------------------
 # ESTADO DA SESSÃO E REINICIALIZAÇÃO
@@ -170,6 +184,12 @@ if "gastro_bairro" not in st.session_state:
 if "gastro_culinaria" not in st.session_state:
     st.session_state.gastro_culinaria = None
 
+def clear_conversation():
+    st.session_state.messages = []
+    st.session_state.session_id = str(uuid.uuid4())
+    reset_flow()
+
+
 def reset_flow():
     st.session_state.active_flow = None
     st.session_state.current_step = 0
@@ -190,8 +210,7 @@ def send_user_message(prompt):
 with st.sidebar:
     st.header("⚙️ Opções")
     if st.button("🗑️ Limpar Conversa", use_container_width=True):
-        st.session_state.messages = []
-        reset_flow()
+        clear_conversation()
         st.rerun()
 
 # ---------------------------------------------------------
@@ -259,7 +278,7 @@ elif st.session_state.active_flow == "cultura":
             col_a, col_b = st.columns(2)
             with col_a:
                 if st.button("🍿 Cartaz", key="btn_cartaz", use_container_width=True):
-                    bot_reply = fetch_tmdb_movies("cartaz")
+                    bot_reply = fetch_tmdb_movies("cartaz", _cache_date=datetime.now(TIMEZONE).date().isoformat())
                     st.session_state.messages.append({"role": "user", "content": "Filmes em Cartaz nos cinemas"})
                     st.session_state.messages.append({"role": "assistant", "content": bot_reply})
                     reset_flow()
@@ -279,7 +298,7 @@ elif st.session_state.active_flow == "cultura":
         with st.container(border=True):
             st.subheader("📅 Passo 3 de 3: Escolha o mês das estreias")
             
-            dt_now = datetime.now()
+            dt_now = datetime.now(TIMEZONE)
             dt_m2 = dt_now + relativedelta(months=1)
             dt_m3 = dt_now + relativedelta(months=2)
 
@@ -291,7 +310,7 @@ elif st.session_state.active_flow == "cultura":
             cols = st.columns(3)
             with cols[0]:
                 if st.button(f"📅 {m1} (Mês Atual)", key="m1", use_container_width=True):
-                    bot_reply = fetch_tmdb_movies("estreias", 0)
+                    bot_reply = fetch_tmdb_movies("estreias", 0, _cache_date=datetime.now(TIMEZONE).date().isoformat())
                     st.session_state.messages.append({"role": "user", "content": f"Estreias de cinema em {m1}"})
                     st.session_state.messages.append({"role": "assistant", "content": bot_reply})
                     reset_flow()
@@ -299,7 +318,7 @@ elif st.session_state.active_flow == "cultura":
 
             with cols[1]:
                 if st.button(f"📅 {m2} (Próximo Mês)", key="m2", use_container_width=True):
-                    bot_reply = fetch_tmdb_movies("estreias", 1)
+                    bot_reply = fetch_tmdb_movies("estreias", 1, _cache_date=datetime.now(TIMEZONE).date().isoformat())
                     st.session_state.messages.append({"role": "user", "content": f"Estreias de cinema em {m2}"})
                     st.session_state.messages.append({"role": "assistant", "content": bot_reply})
                     reset_flow()
@@ -307,7 +326,7 @@ elif st.session_state.active_flow == "cultura":
 
             with cols[2]:
                 if st.button(f"📅 {m3}", key="m3", use_container_width=True):
-                    bot_reply = fetch_tmdb_movies("estreias", 2)
+                    bot_reply = fetch_tmdb_movies("estreias", 2, _cache_date=datetime.now(TIMEZONE).date().isoformat())
                     st.session_state.messages.append({"role": "user", "content": f"Estreias de cinema em {m3}"})
                     st.session_state.messages.append({"role": "assistant", "content": bot_reply})
                     reset_flow()

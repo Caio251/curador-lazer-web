@@ -48,8 +48,20 @@ MESES_PT = {
     9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro"
 }
 
+# Dicionário local para curadoria exclusiva de casas renomadas
+CURADORIA_LOCAL = {
+    "gero": {
+        "historia": "Fundado pelo Grupo Fasano, é um ícone da alta gastronomia italiana no Rio de Janeiro. Preserva a tradição das clássicas cantinas elegantes com ambiente sofisticado e atendimento impecável.",
+        "destaques": "O famoso Ravioli de Maçã com Molho de Gorgonzola ou o Ossobuco com Risoto Milanês, harmonizados com a vasta carta de vinhos italianos da casa."
+    },
+    "bar do mineiro": {
+        "historia": "Um dos botequins mais emblemáticos de Santa Teresa, famoso pela atmosfera boêmia, paredes decoradas com obras de arte e tradição na autêntica comida mineira.",
+        "destaques": "A farta e tradicional Feijoada completa da casa, os pastéis de feijão super crocantes e uma caipirinha de cachaça artesanal."
+    }
+}
+
 # ---------------------------------------------------------
-# ESTILOS CSS PERSONALIZADOS
+# ESTILOS CSS PERSONALIZADOS (DESIGN SYSTEM V4.1)
 # ---------------------------------------------------------
 st.markdown("""
 <style>
@@ -106,7 +118,7 @@ def detect_intent(text_prompt):
         return "⚠️ Não foi possível consultar as recomendações agora. Tente novamente."
 
 # ---------------------------------------------------------
-# CONSULTA DE FILMES NO TMDB
+# CONSULTA E CURADORIA DE FILMES NO TMDB
 # ---------------------------------------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_tmdb_movies(mode: str, month_offset: int = 0, _cache_date: str = ""):
@@ -150,15 +162,40 @@ def fetch_tmdb_movies(mode: str, month_offset: int = 0, _cache_date: str = ""):
                 "overview": overview,
                 "genres": ", ".join(genres) if genres else "Não informado",
                 "poster_path": m.get("poster_path"),
-                "release_date": m.get("release_date", "N/A")
+                "release_date": m.get("release_date", "N/A"),
+                "vote_average": m.get("vote_average", 0)
             })
         return movies, None
     except Exception:
         logger.exception("Falha na consulta TMDB")
         return None, "⚠️ Não foi possível consultar os filmes agora."
 
+def gerar_curadoria_filme(movie):
+    """Gera uma recomendação focada na experiência do filme."""
+    rating = movie.get("vote_average", 0)
+    genres = movie.get("genres", "")
+    
+    motivos = []
+    if rating >= 8.0:
+        motivos.append("altíssima nota do público e aclamação da crítica")
+    elif rating >= 7.0:
+        motivos.append("boa recepção de público e história envolvente")
+    else:
+        motivos.append("opção de entretenimento ideal para quem aprecia o gênero")
+        
+    if "Ação" in genres or "Ficção Científica" in genres:
+        experiencia = "Recomendado para ver em salas com som imersivo e tela grande."
+    elif "Animação" in genres or "Família" in genres:
+        experiencia = "Ótima opção para assistir em família."
+    elif "Drama" in genres or "Romance" in genres:
+        experiencia = "Perfeito para quem busca uma narrativa profunda e boas atuações."
+    else:
+        experiencia = "Excelente pedida para aproveitar a sessão de cinema."
+
+    return f"Escolha destacada por ter {' e '.join(motivos)}. {experiencia}"
+
 # ---------------------------------------------------------
-# GOOGLE PLACES — BUSCA GASTRONÔMICA
+# GOOGLE PLACES E CURADORIA GASTRONÔMICA
 # ---------------------------------------------------------
 BAIRROS_REGIAO_OCEANICA = (
     "Itaipu", "Itacoatiara", "Piratininga", "Camboinhas", "Engenho do Mato",
@@ -252,7 +289,8 @@ def fetch_places(cidade: str, bairro: str, culinaria: str):
         "X-Goog-FieldMask": (
             "places.id,places.displayName,places.formattedAddress,"
             "places.rating,places.userRatingCount,places.googleMapsUri,"
-            "places.businessStatus,places.location,places.priceLevel,places.priceRange"
+            "places.businessStatus,places.location,places.priceLevel,places.priceRange,"
+            "places.editorialSummary"
         ),
     }
     try:
@@ -263,6 +301,9 @@ def fetch_places(cidade: str, bairro: str, culinaria: str):
         for place in data.get("places", []):
             if place.get("businessStatus") == "CLOSED_PERMANENTLY":
                 continue
+            
+            editorial_text = place.get("editorialSummary", {}).get("text") if isinstance(place.get("editorialSummary"), dict) else None
+            
             places.append({
                 "id": place.get("id", ""),
                 "nome": place.get("displayName", {}).get("text", "Nome indisponível"),
@@ -275,6 +316,7 @@ def fetch_places(cidade: str, bairro: str, culinaria: str):
                 "longitude": place.get("location", {}).get("longitude"),
                 "nivel_preco": place.get("priceLevel"),
                 "faixa_preco": place.get("priceRange"),
+                "editorial_summary": editorial_text
             })
         return places, None
     except Exception:
@@ -412,30 +454,43 @@ def extrair_filtros_gastronomia(texto, filtros_anteriores=None):
     return {"cidade": cidade, "bairro": bairro or "Qualquer Bairro", "culinaria": culinaria, "preco": anterior.get("preco", "Não informado")}
 
 def gerar_curadoria_restaurante(place, culinaria, orcamento, bairro):
-    """Gera o conceito e a justificativa da escolha humanizada."""
-    nota = place.get("avaliacao")
-    total = place.get("total_avaliacoes") or 0
+    """Gera histórico/tradição e recomendação personalizada com pratos e bebidas."""
+    nome = place.get("nome", "")
+    nome_chave = normalizar(nome)
     categoria = (culinaria or "gastronomia").lower()
-    
-    if categoria != "outras":
-        estilo = f"Especializado na culinária {categoria.capitalize()}, oferecendo pratos representativos do segmento em {bairro}."
-    else:
-        estilo = f"Opção gastronômica em {bairro}, com cardápio variado e boa presença na região."
+    editorial = place.get("editorial_summary")
 
-    motivos = []
-    if isinstance(nota, (int, float)) and nota >= 4.5 and total >= 100:
-        motivos.append("excelente aprovação do público e constância no serviço")
-    elif total >= 300:
-        motivos.append("grande volume de avaliações e popularidade local")
+    # 1. Verifica curadoria local customizada
+    curadoria_custom = next((v for k, v in CURADORIA_LOCAL.items() if k in nome_chave), None)
+
+    if curadoria_custom:
+        historia = curadoria_custom["historia"]
+        porque_ir = f"**O que pedir:** {curadoria_custom['destaques']}"
     else:
-        motivos.append("boa localização e perfil bem avaliado")
-        
-    classe_preco = classificar_orcamento(place, orcamento)
-    if classe_preco == "compativel":
-        motivos.append("faixa de preço alinhada à sua preferência de orçamento")
-        
-    porque_ir = f"Escolha recomendada por ter {' e '.join(motivos)}."
-    return estilo, porque_ir
+        # 2. Resumo do Google ou síntese por segmento
+        if editorial:
+            historia = editorial
+        else:
+            if categoria != "outras":
+                historia = f"Estabelecimento destacado em {bairro}, referência na preparação de culinária {categoria.capitalize()} com foco na qualidade dos ingredientes e tradição da casa."
+            else:
+                historia = f"Ponto gastronômico consolidado na região de {bairro}, conhecido pela atmosfera agradável e dedicação no preparo."
+
+        sugestoes = {
+            "Japonesa": "Especialidades em sushis e sashimis frescos. Experimente o combinado do chefe acompanhado por um saquê especial ou cocktail autoral.",
+            "Italiana": "Foco em massas artesanais e molhos clássicos. A sugestão da casa inclui massas frescas acompanhadas por um bom vinho tinto.",
+            "Hamburgueria": "Hambúrgueres artesanais grelhados na brasa com queijos selecionados, perfeitos para acompanhar batatas rústicas e cerveja artesanal bem gelada.",
+            "Pizzaria": "Pizzas de fermentação natural assadas em alta temperatura. A combinação ideal inclui a pizza de assinatura e um drink refrescante ou vinho.",
+            "Árabe": "Tradição em pastas artesanais (hommus, babaganoush), kibes e esfiha. Acompanha perfeitamente o chá de hortelã tradicional ou cerveja leve.",
+            "Brasileira": "Sabores autênticos com porções fartas. Destaque para os pratos típicos e caipirinhas preparadas com frutas da estação.",
+            "Peruana": "Ceviches frescos marinados no leite de tigre com milho crioulo, harmonizados com o clássico cocktail Pisco Sour.",
+            "Chinesa": "Tradição em pratos fartos para compartilhar. Destaque para o Yakisoba tradicional e os rolinhos primavera crocantes.",
+            "Asiática em geral": "Fusão de sabores marcantes. Vale explorar os pratos no wok, como o Pad Thai ou baos recheados, harmonizados com drinks à base de especiarias."
+        }
+
+        porque_ir = f"**Sugestão da casa:** {sugestoes.get(culinaria, 'Consulte os pratos principais do dia e a carta de bebidas para uma experiência completa.')}"
+
+    return historia, porque_ir
 
 def formatar_preco_restaurante(place):
     low, high = faixa_informada(place)
@@ -515,7 +570,7 @@ if enviar and entrada_livre.strip():
     send_user_message(entrada_livre.strip())
     st.rerun()
 
-# MENU PRINCIPAL (SIMPLIFICADO EM 2 CATEGORIAS PRINCIPAIS)
+# MENU PRINCIPAL (2 CATEGORIAS PRINCIPAIS)
 if st.session_state.current_step == 0:
     st.subheader("✨ Explore por categoria")
     col1, col2 = st.columns(2, gap="medium")
@@ -725,10 +780,10 @@ if st.session_state.messages:
                             
                             st.markdown(f"{nota_html} • 💰 **{preco_txt}**")
                             
-                            # Conceito e Justificativa de Curadoria
-                            estilo_txt, porque_ir_txt = gerar_curadoria_restaurante(place, msg.get("culinaria"), msg.get("preco", "Sem preferência"), msg['bairro'])
-                            st.write(f"📝 *{estilo_txt}*")
-                            st.write(f"💡 {porque_ir_txt}")
+                            # Curadoria Enriquecida
+                            historia_txt, porque_ir_txt = gerar_curadoria_restaurante(place, msg.get("culinaria"), msg.get("preco", "Sem preferência"), msg['bairro'])
+                            st.markdown(f"🏛️ **Origem & Tradição:** *{historia_txt}*")
+                            st.markdown(f"🍷 **Por que ir & O que pedir:** *{porque_ir_txt}*")
                             
                             st.caption(f"📍 {place['endereco']}")
                             if place.get("distancia_km"):
@@ -759,8 +814,17 @@ if st.session_state.messages:
                                 
                         with col_txt:
                             st.markdown(f"#### {movie['title']}")
-                            st.markdown(f"🏷️ **Gênero:** {movie['genres']}")
-                            st.write(movie['overview'])
+                            
+                            # Tags de gênero e nota do público
+                            rating_txt = f"⭐ **{movie['vote_average']:.1f}/10**" if movie.get("vote_average") else ""
+                            st.markdown(f"🏷️ **Gênero:** {movie['genres']} • {rating_txt}")
+                            
+                            # Curadoria e motivo para assistir
+                            porque_assistir = gerar_curadoria_filme(movie)
+                            st.markdown(f"💡 **Por que assistir:** *{porque_assistir}*")
+                            
+                            # Sinopse completa
+                            st.write(f"📝 **Sinopse:** _{movie['overview']}_")
 
             # RESPOSTAS DE TEXTO PADRÃO
             else:

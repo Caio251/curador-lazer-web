@@ -275,7 +275,7 @@ def fetch_places(cidade: str, bairro: str, culinaria: str):
         "X-Goog-FieldMask": (
             "places.id,places.displayName,places.formattedAddress,"
             "places.rating,places.userRatingCount,places.googleMapsUri,"
-            "places.businessStatus,places.location"
+            "places.businessStatus,places.location,places.priceLevel,places.priceRange"
         ),
     }
     try:
@@ -301,6 +301,8 @@ def fetch_places(cidade: str, bairro: str, culinaria: str):
                 "situacao": place.get("businessStatus", ""),
                 "latitude": place.get("location", {}).get("latitude"),
                 "longitude": place.get("location", {}).get("longitude"),
+                "nivel_preco": place.get("priceLevel"),
+                "faixa_preco": place.get("priceRange"),
             })
         logger.info("Consulta Places concluída: %d resultados", len(places))
         return places, None
@@ -309,18 +311,77 @@ def fetch_places(cidade: str, bairro: str, culinaria: str):
         return None, "Não foi possível consultar os restaurantes. Verifique a API, a chave, o faturamento e os logs."
 
 
-def escolher_restaurantes(candidatos, anteriores=(), quantidade=3):
-    """Sorteia sem reposição; evita a seleção anterior quando possível."""
+ORCAMENTOS = {
+    "Até R$ 50": (0, 50),
+    "R$ 50–80": (50, 80),
+    "R$ 80–120": (80, 120),
+    "R$ 120–200": (120, 200),
+    "Acima de R$ 200": (200, None),
+    "Sem preferência": (None, None),
+}
+
+
+def valor_monetario(money):
+    """Converte objeto Money da API em BRL, sem inferir preço por pessoa."""
+    if not isinstance(money, dict) or money.get("currencyCode") != "BRL":
+        return None
+    try:
+        return float(money.get("units", 0)) + float(money.get("nanos", 0)) / 1e9
+    except (ValueError, TypeError):
+        return None
+
+
+def faixa_informada(place):
+    price = place.get("faixa_preco") or {}
+    low = valor_monetario(price.get("startPrice"))
+    high = valor_monetario(price.get("endPrice"))
+    return low, high
+
+
+def compatibilidade_orcamento(place, orcamento):
+    """Retorna (compatível, comprovado); faixa Places não é gasto por pessoa."""
+    if orcamento not in ORCAMENTOS or orcamento == "Sem preferência":
+        return True, False
+    minimo, maximo = ORCAMENTOS[orcamento]
+    low, high = faixa_informada(place)
+    if low is None and high is None:
+        return True, False
+    if maximo is not None and low is not None and low > maximo:
+        return False, True
+    if minimo is not None and high is not None and high < minimo:
+        return False, True
+    return True, True
+
+
+def pontuacao(place, orcamento):
+    """Peso de sorteio: avaliação suavizada e confiança no volume de avaliações."""
+    rating = place.get("avaliacao")
+    count = place.get("total_avaliacoes") or 0
+    try:
+        rating = max(0.0, min(5.0, float(rating)))
+        count = max(0, int(count))
+    except (TypeError, ValueError):
+        rating, count = 0.0, 0
+    media_suavizada = (rating * count + 4.0 * 50) / (count + 50)
+    _, comprovado = compatibilidade_orcamento(place, orcamento)
+    return max(0.1, (media_suavizada / 5.0) ** 4 * (1.15 if comprovado else 1.0))
+
+
+def escolher_restaurantes(candidatos, anteriores=(), quantidade=3, orcamento="Sem preferência"):
+    """Sorteio ponderado sem reposição, priorizando inéditos."""
     unicos = list({p["id"]: p for p in candidatos if p.get("id")}.values())
     anteriores = set(anteriores)
     novos = [p for p in unicos if p["id"] not in anteriores]
+    antigos = [p for p in unicos if p["id"] in anteriores]
     rng = random.SystemRandom()
-    if len(novos) >= quantidade:
-        return rng.sample(novos, quantidade)
-    # Prioriza inéditos, mas completa a lista quando a base é pequena.
-    selecionados = rng.sample(novos, len(novos))
-    restantes = [p for p in unicos if p["id"] in anteriores]
-    selecionados.extend(rng.sample(restantes, min(quantidade - len(selecionados), len(restantes))))
+    selecionados = []
+    for grupo in (novos, antigos):
+        grupo = grupo.copy()
+        while grupo and len(selecionados) < quantidade:
+            pesos = [pontuacao(p, orcamento) for p in grupo]
+            escolhido = rng.choices(grupo, weights=pesos, k=1)[0]
+            selecionados.append(escolhido)
+            grupo.remove(escolhido)
     return selecionados
 
 
@@ -342,7 +403,9 @@ def pesquisar_restaurantes(cidade, bairro, culinaria, preco_label="Não informad
     places_validos = [p for p in places if endereco_na_regiao(p["endereco"], cidade, bairro)]
     excluidos = len(places) - len(places_validos)
     places_validos = filtrar_por_distancia(places_validos, cidade, bairro, raio_km)
-    escolhidos = escolher_restaurantes(places_validos, anteriores)
+    orcamento = preco_label if preco_label in ORCAMENTOS else "Sem preferência"
+    places_validos = [p for p in places_validos if compatibilidade_orcamento(p, orcamento)[0]]
+    escolhidos = escolher_restaurantes(places_validos, anteriores, orcamento=orcamento)
     st.session_state.last_place_filters = filtros
     st.session_state.last_place_ids = [p["id"] for p in escolhidos]
     st.session_state.messages.append({
@@ -695,8 +758,8 @@ elif st.session_state.active_flow == "gastronomia":
 
     elif st.session_state.current_step == 4:
         with st.container(border=True):
-            st.subheader(f"💰 Passo 4 de 4: Preferência de preço ({st.session_state.gastro_culinaria})")
-            st.caption("Nesta entrega, o preço é apenas uma preferência registrada; a API ainda não verifica nem filtra valores de cardápio.")
+            st.subheader(f"💰 Passo 4 de 4: Orçamento ({st.session_state.gastro_culinaria})")
+            st.caption("As faixas do Google Places são indicativas e não representam necessariamente o gasto por pessoa. Locais sem informação de preço continuam elegíveis, com aviso.")
 
             bairro_atual = st.session_state.gastro_bairro
             referencia_disponivel = bairro_atual in REFERENCIAS.get(st.session_state.gastro_cidade, {})
@@ -710,19 +773,10 @@ elif st.session_state.active_flow == "gastronomia":
                 st.session_state.raio_selecionado = None
                 st.caption("Raio indisponível para Qualquer Bairro e Região Oceânica; mantém-se o filtro por endereço.")
 
-            precos = [
-                ("$", "Econômico ($)"),
-                ("$$", "Moderado ($$)"),
-                ("$$$", "Sofisticado ($$$)"),
-                ("$$$$", "Alta Gastronomia ($$$$)")
-            ]
-
-            cols = st.columns(4)
-            for i, (simbolo, rotulo) in enumerate(precos):
-                with cols[i]:
-                    if st.button(rotulo, key=f"p_{i}", use_container_width=True):
-                        search_gastronomia(rotulo)
-                        st.rerun()
+            orcamento = st.selectbox("Orçamento desejado por pessoa (referência)", list(ORCAMENTOS), index=5)
+            if st.button("Buscar restaurantes", use_container_width=True):
+                search_gastronomia(orcamento)
+                st.rerun()
 
             st.divider()
             if st.button("⬅️ Voltar para Culinárias"):
@@ -741,7 +795,7 @@ with st.container(height=420, border=True):
                 st.caption(f"Busca: {msg['culinaria']} · {msg['bairro']} · {msg['cidade']}")
                 if msg.get("raio_km") is not None:
                     st.caption(f"Raio máximo: {msg['raio_km']:g} km do ponto aproximado do bairro")
-                st.caption("O preço não foi validado. Confirme localização, funcionamento e valores antes de visitar.")
+                st.caption("Orçamento selecionado: " + str(msg.get("preco", "Sem preferência")) + ". Os valores do Google Places não garantem gasto por pessoa; confirme o cardápio.")
                 if not msg["places"]:
                     st.info("Não encontrei restaurantes cujo endereço confirme a região escolhida. Tente outro bairro ou 'Qualquer Bairro'.")
                 for place in msg["places"]:
@@ -750,6 +804,16 @@ with st.container(height=420, border=True):
                         st.write(place["endereco"])
                         if place.get("distancia_km") is not None:
                             st.caption(f"Distância em linha reta: {place['distancia_km']:.2f} km do ponto de referência")
+                        low, high = faixa_informada(place)
+                        if low is not None or high is not None:
+                            preco_texto = (f"R$ {low:,.0f}" if low is not None else "valor inicial indisponível")
+                            if high is not None:
+                                preco_texto += f" a R$ {high:,.0f}"
+                            st.caption(f"Faixa indicativa informada pelo Google: {preco_texto} (não necessariamente por pessoa)")
+                        elif place.get("nivel_preco"):
+                            st.caption(f"Nível de preço Google: {place['nivel_preco']} (sem valor em reais confirmado)")
+                        else:
+                            st.caption("Preço não informado pelo Google")
                         if place["avaliacao"] is not None:
                             st.write(f"Avaliação Google: {place['avaliacao']}/5 · {place['total_avaliacoes'] or 0} avaliações")
                         if place["situacao"] == "CLOSED_TEMPORARILY":

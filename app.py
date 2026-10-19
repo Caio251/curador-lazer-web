@@ -510,14 +510,17 @@ if "current_step" not in st.session_state: st.session_state.current_step = 0
 if "gastro_cidade" not in st.session_state: st.session_state.gastro_cidade = None
 if "gastro_bairro" not in st.session_state: st.session_state.gastro_bairro = None
 if "gastro_culinaria" not in st.session_state: st.session_state.gastro_culinaria = None
-
+    
 def clear_conversation():
     st.session_state.messages = []
     st.session_state.session_id = str(uuid.uuid4())
     st.session_state.last_place_filters = None
     st.session_state.last_place_ids = []
     reset_flow()
-    st.session_state.confirmar_limpeza = False
+    
+    # Remove a chave do checkbox para que ele volte desmarcado sem conflito de estado
+    if "confirmar_limpeza" in st.session_state:
+        del st.session_state["confirmar_limpeza"]
 
 def reset_flow():
     st.session_state.active_flow = None

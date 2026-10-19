@@ -22,6 +22,7 @@ PROJECT_ID = "curador-lazer-app"
 LOCATION = "us-central1"
 AGENT_ID = "eae9afb0-e7fa-49f0-9f4d-04e73002bc47"
 TMDB_API_KEY = st.secrets.get("TMDB_API_KEY", "")
+GOOGLE_PLACES_API_KEY = st.secrets.get("GOOGLE_PLACES_API_KEY", "")
 TIMEZONE = ZoneInfo("America/Sao_Paulo")
 logger = logging.getLogger("curador_lazer")
 if not logger.handlers:
@@ -163,6 +164,81 @@ def fetch_tmdb_movies(mode: str, month_offset: int = 0, _cache_date: str = "") -
     except (requests.exceptions.RequestException, ValueError, TypeError, AttributeError):
         logger.exception("Falha na consulta ou interpretação dos dados TMDB")
         return "⚠️ Não foi possível consultar os filmes agora. Tente novamente."
+
+# ---------------------------------------------------------
+# GOOGLE PLACES (NEW) — BUSCA GASTRONÔMICA
+# Sem cache ou armazenamento persistente de dados do Places.
+# ---------------------------------------------------------
+def fetch_places(cidade: str, bairro: str, culinaria: str):
+    if not GOOGLE_PLACES_API_KEY:
+        return None, "A chave GOOGLE_PLACES_API_KEY não está configurada nos Secrets."
+
+    local = f"{bairro}, {cidade}" if bairro != "Qualquer Bairro" else cidade
+    termo = "restaurantes" if culinaria == "Outras" else f"restaurantes de culinária {culinaria}"
+    payload = {
+        "textQuery": f"{termo} em {local}, RJ, Brasil",
+        "languageCode": "pt-BR",
+        "regionCode": "BR",
+        "pageSize": 8,
+        "includedType": "restaurant",
+        "strictTypeFiltering": False,
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
+        "X-Goog-FieldMask": (
+            "places.id,places.displayName,places.formattedAddress,"
+            "places.rating,places.userRatingCount,places.googleMapsUri,"
+            "places.businessStatus"
+        ),
+    }
+    try:
+        response = requests.post(
+            "https://places.googleapis.com/v1/places:searchText",
+            json=payload, headers=headers, timeout=12
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError("Formato de resposta inesperado")
+        places = []
+        for place in data.get("places", []):
+            if place.get("businessStatus") == "CLOSED_PERMANENTLY":
+                continue
+            places.append({
+                "id": place.get("id", ""),
+                "nome": place.get("displayName", {}).get("text", "Nome indisponível"),
+                "endereco": place.get("formattedAddress", "Endereço indisponível"),
+                "avaliacao": place.get("rating"),
+                "total_avaliacoes": place.get("userRatingCount"),
+                "maps_url": place.get("googleMapsUri", ""),
+                "situacao": place.get("businessStatus", ""),
+            })
+        logger.info("Consulta Places concluída: %d resultados", len(places))
+        return places, None
+    except (requests.exceptions.RequestException, ValueError, TypeError, KeyError):
+        logger.exception("Falha na consulta Places")
+        return None, "Não foi possível consultar os restaurantes. Verifique a API, a chave, o faturamento e os logs."
+
+
+def search_gastronomia(preco_label: str):
+    cidade = st.session_state.gastro_cidade
+    bairro = st.session_state.gastro_bairro
+    culinaria = st.session_state.gastro_culinaria
+    descricao = f"Restaurantes de culinária {culinaria} em {bairro if bairro != 'Qualquer Bairro' else cidade} ({cidade})"
+    st.session_state.messages.append({"role": "user", "content": descricao})
+    with st.spinner("Consultando restaurantes no Google Places..."):
+        places, error = fetch_places(cidade, bairro, culinaria)
+    if error:
+        st.session_state.messages.append({"role": "assistant", "content": f"⚠️ {error}"})
+    else:
+        st.session_state.messages.append({
+            "role": "assistant", "kind": "places", "places": places,
+            "cidade": cidade, "bairro": bairro, "culinaria": culinaria,
+            "preco": preco_label,
+        })
+    reset_flow()
+
 
 # ---------------------------------------------------------
 # ESTADO DA SESSÃO E REINICIALIZAÇÃO
@@ -413,7 +489,8 @@ elif st.session_state.active_flow == "gastronomia":
 
     elif st.session_state.current_step == 4:
         with st.container(border=True):
-            st.subheader(f"💰 Passo 4 de 4: Faixa de preço ({st.session_state.gastro_culinaria})")
+            st.subheader(f"💰 Passo 4 de 4: Preferência de preço ({st.session_state.gastro_culinaria})")
+            st.caption("Nesta entrega, o preço é apenas uma preferência registrada; a API ainda não verifica nem filtra valores de cardápio.")
 
             precos = [
                 ("$", "Econômico ($)"),
@@ -426,12 +503,7 @@ elif st.session_state.active_flow == "gastronomia":
             for i, (simbolo, rotulo) in enumerate(precos):
                 with cols[i]:
                     if st.button(rotulo, key=f"p_{i}", use_container_width=True):
-                        if st.session_state.gastro_bairro == "Qualquer Bairro":
-                            prompt = f"Recomende restaurantes de culinária {st.session_state.gastro_culinaria} com faixa de preço {simbolo} em {st.session_state.gastro_cidade}."
-                        else:
-                            prompt = f"Recomende restaurantes de culinária {st.session_state.gastro_culinaria} com faixa de preço {simbolo} em {st.session_state.gastro_cidade}, de preferência na região de {st.session_state.gastro_bairro}."
-                        
-                        send_user_message(prompt)
+                        search_gastronomia(rotulo)
                         st.rerun()
 
             st.divider()
@@ -446,7 +518,25 @@ st.divider()
 # ---------------------------------------------------------
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
+        if msg.get("kind") == "places":
+            st.markdown("**Restaurantes encontrados no Google Places**")
+            st.caption(f"Busca: {msg['culinaria']} · {msg['bairro']} · {msg['cidade']}")
+            st.caption("A preferência de preço não foi validada. Confirme bairro, funcionamento e valores antes de visitar.")
+            if not msg["places"]:
+                st.info("Nenhum restaurante encontrado para essa pesquisa.")
+            for place in msg["places"]:
+                with st.container(border=True):
+                    st.markdown(f"**{place['nome']}**")
+                    st.write(place["endereco"])
+                    if place["avaliacao"] is not None:
+                        st.write(f"Avaliação Google: {place['avaliacao']}/5 · {place['total_avaliacoes'] or 0} avaliações")
+                    if place["situacao"] == "CLOSED_TEMPORARILY":
+                        st.warning("Marcado como temporariamente fechado")
+                    if place["maps_url"]:
+                        st.link_button("Ver no Google Maps", place["maps_url"])
+            st.caption("Dados de estabelecimentos: Google Maps. Resultados podem incluir locais fora do bairro solicitado.")
+        else:
+            st.markdown(msg["content"])
 
 if user_input := st.chat_input("Ou digite uma busca específica..."):
     send_user_message(user_input)

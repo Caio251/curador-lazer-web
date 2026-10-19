@@ -338,19 +338,34 @@ def faixa_informada(place):
     return low, high
 
 
-def compatibilidade_orcamento(place, orcamento):
-    """Retorna (compatível, comprovado); faixa Places não é gasto por pessoa."""
+def classificar_orcamento(place, orcamento):
+    """Classifica evidência monetária do Places; não comprova gasto por pessoa.
+
+    Valores: compativel, parcial, desconhecido, incompatível, sem_filtro.
+    Uma faixa sobreposta é parcial; uma faixa inteiramente contida é compatível.
+    """
     if orcamento not in ORCAMENTOS or orcamento == "Sem preferência":
-        return True, False
+        return "sem_filtro"
     minimo, maximo = ORCAMENTOS[orcamento]
     low, high = faixa_informada(place)
     if low is None and high is None:
-        return True, False
+        return "desconhecido"
     if maximo is not None and low is not None and low > maximo:
-        return False, True
+        return "incompatível"
     if minimo is not None and high is not None and high < minimo:
-        return False, True
-    return True, True
+        return "incompatível"
+    # Só considerar totalmente compatível se os dois extremos são conhecidos.
+    if (low is not None and high is not None
+            and (minimo is None or low >= minimo)
+            and (maximo is None or high <= maximo)):
+        return "compativel"
+    return "parcial"
+
+
+def compatibilidade_orcamento(place, orcamento):
+    """Compatibilidade histórica para preservar chamadas existentes."""
+    classe = classificar_orcamento(place, orcamento)
+    return classe != "incompatível", classe in ("compativel", "parcial")
 
 
 def pontuacao(place, orcamento):
@@ -368,20 +383,27 @@ def pontuacao(place, orcamento):
 
 
 def escolher_restaurantes(candidatos, anteriores=(), quantidade=3, orcamento="Sem preferência"):
-    """Sorteio ponderado sem reposição, priorizando inéditos."""
+    """Prioriza evidência de preço; sorteia por qualidade em cada categoria.
+
+    Dentro de cada categoria, prefere restaurantes não mostrados na última rodada.
+    """
     unicos = list({p["id"]: p for p in candidatos if p.get("id")}.values())
     anteriores = set(anteriores)
-    novos = [p for p in unicos if p["id"] not in anteriores]
-    antigos = [p for p in unicos if p["id"] in anteriores]
     rng = random.SystemRandom()
     selecionados = []
-    for grupo in (novos, antigos):
-        grupo = grupo.copy()
-        while grupo and len(selecionados) < quantidade:
-            pesos = [pontuacao(p, orcamento) for p in grupo]
-            escolhido = rng.choices(grupo, weights=pesos, k=1)[0]
-            selecionados.append(escolhido)
-            grupo.remove(escolhido)
+    grupos = ("compativel", "parcial", "desconhecido") if orcamento in ORCAMENTOS and orcamento != "Sem preferência" else ("sem_filtro",)
+    for categoria in grupos:
+        candidatos_categoria = [p for p in unicos if classificar_orcamento(p, orcamento) == categoria]
+        for grupo in ([p for p in candidatos_categoria if p["id"] not in anteriores],
+                      [p for p in candidatos_categoria if p["id"] in anteriores]):
+            grupo = grupo.copy()
+            while grupo and len(selecionados) < quantidade:
+                pesos = [pontuacao(p, orcamento) for p in grupo]
+                escolhido = rng.choices(grupo, weights=pesos, k=1)[0]
+                selecionados.append(escolhido)
+                grupo.remove(escolhido)
+        if len(selecionados) >= quantidade:
+            break
     return selecionados
 
 
@@ -413,6 +435,7 @@ def pesquisar_restaurantes(cidade, bairro, culinaria, preco_label="Não informad
         **filtros,
         "total_candidatos": len(places_validos),
         "total_excluidos": excluidos,
+        "total_sem_preco": sum(classificar_orcamento(p, orcamento) == "desconhecido" for p in places_validos),
     })
 
 
@@ -759,7 +782,7 @@ elif st.session_state.active_flow == "gastronomia":
     elif st.session_state.current_step == 4:
         with st.container(border=True):
             st.subheader(f"💰 Passo 4 de 4: Orçamento ({st.session_state.gastro_culinaria})")
-            st.caption("As faixas do Google Places são indicativas e não representam necessariamente o gasto por pessoa. Locais sem informação de preço continuam elegíveis, com aviso.")
+            st.caption("As faixas do Google Places são indicativas e não representam necessariamente o gasto por pessoa. Locais sem informação de preço são alternativas, priorizadas apenas depois das opções com faixa monetária compatível.")
 
             bairro_atual = st.session_state.gastro_bairro
             referencia_disponivel = bairro_atual in REFERENCIAS.get(st.session_state.gastro_cidade, {})
@@ -791,7 +814,7 @@ with st.container(height=420, border=True):
     for idx, msg in enumerate(st.session_state.messages):
         with st.chat_message(msg["role"]):
             if msg.get("kind") == "places":
-                st.markdown("**Três sugestões sorteadas do Google Places**")
+                st.markdown(f"**{len(msg['places'])} sugestão(ões) selecionada(s) do Google Places**")
                 st.caption(f"Busca: {msg['culinaria']} · {msg['bairro']} · {msg['cidade']}")
                 if msg.get("raio_km") is not None:
                     st.caption(f"Raio máximo: {msg['raio_km']:g} km do ponto aproximado do bairro")
@@ -814,6 +837,13 @@ with st.container(height=420, border=True):
                             st.caption(f"Nível de preço Google: {place['nivel_preco']} (sem valor em reais confirmado)")
                         else:
                             st.caption("Preço não informado pelo Google")
+                        classe_preco = classificar_orcamento(place, msg.get("preco", "Sem preferência"))
+                        if classe_preco == "compativel":
+                            st.caption("Faixa monetária informada integralmente dentro do orçamento de referência; gasto por pessoa não garantido.")
+                        elif classe_preco == "parcial":
+                            st.caption("Faixa monetária parcialmente compatível ou incompleta; confirme os valores antes de visitar.")
+                        elif classe_preco == "desconhecido":
+                            st.caption("Alternativa sem preço monetário verificado para o orçamento escolhido.")
                         if place["avaliacao"] is not None:
                             st.write(f"Avaliação Google: {place['avaliacao']}/5 · {place['total_avaliacoes'] or 0} avaliações")
                         if place["situacao"] == "CLOSED_TEMPORARILY":

@@ -369,8 +369,14 @@ def send_user_message(prompt):
             st.session_state.messages.append({"role": "user", "content": prompt})
             st.session_state.messages.append({"role": "assistant", "content":
                 "Para pesquisar restaurantes reais, informe a cidade (Rio de Janeiro ou Niterói) e, se desejar, o bairro."})
-        else:
-            pesquisar_restaurantes(**filtros)
+        else:            
+            pesquisar_restaurantes(
+                cidade=filtros["cidade"],
+                bairro=filtros["bairro"],
+                culinaria=filtros["culinaria"],
+                preco_label=filtros.get("preco", "Não informado"),
+)
+
     else:
         st.session_state.messages.append({"role": "user", "content": prompt})
         with st.spinner("Consultando recomendações..."):

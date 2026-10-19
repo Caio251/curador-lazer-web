@@ -4,6 +4,10 @@ import uuid
 import requests
 import logging
 import os
+import re
+import random
+import math
+import unicodedata
 from zoneinfo import ZoneInfo
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
@@ -22,6 +26,7 @@ PROJECT_ID = "curador-lazer-app"
 LOCATION = "us-central1"
 AGENT_ID = "eae9afb0-e7fa-49f0-9f4d-04e73002bc47"
 TMDB_API_KEY = st.secrets.get("TMDB_API_KEY", "")
+GOOGLE_PLACES_API_KEY = st.secrets.get("GOOGLE_PLACES_API_KEY", "")
 TIMEZONE = ZoneInfo("America/Sao_Paulo")
 logger = logging.getLogger("curador_lazer")
 if not logger.handlers:
@@ -165,6 +170,342 @@ def fetch_tmdb_movies(mode: str, month_offset: int = 0, _cache_date: str = "") -
         return "⚠️ Não foi possível consultar os filmes agora. Tente novamente."
 
 # ---------------------------------------------------------
+# GOOGLE PLACES (NEW) — BUSCA GASTRONÔMICA
+# Sem cache ou armazenamento persistente de dados do Places.
+# ---------------------------------------------------------
+# Validação conservadora do endereço retornado pelo Google Places.
+# "Região Oceânica" não é bairro administrativo: corresponde a vários bairros.
+BAIRROS_REGIAO_OCEANICA = (
+    "Itaipu", "Itacoatiara", "Piratininga", "Camboinhas", "Engenho do Mato",
+    "Serra Grande", "Maravista", "Santo Antônio", "Jacaré", "Cafubá"
+)
+
+
+def endereco_na_regiao(endereco: str, cidade: str, bairro: str) -> bool:
+    """Aceita apenas endereços que mencionem cidade e bairro explicitamente.
+
+    É um filtro conservador por texto, não uma verificação de limites oficiais.
+    """
+    if not endereco or endereco == "Endereço indisponível":
+        return False
+    e = normalizar(endereco)
+    if normalizar(cidade) not in e:
+        return False
+    if bairro == "Qualquer Bairro":
+        return True
+    if bairro == "Região Oceânica":
+        return any(normalizar(b) in e for b in BAIRROS_REGIAO_OCEANICA)
+    # Evita correspondências parciais como 'Leme' dentro de outra palavra.
+    return bool(re.search(r"(?<!\w)" + re.escape(normalizar(bairro)) + r"(?!\w)", e))
+
+
+# Pontos aproximados de referência, não polígonos oficiais de bairros.
+# Coordenadas (latitude, longitude) em graus decimais.
+REFERENCIAS = {
+    "Rio de Janeiro": {
+        "Aterro do Flamengo": (-22.9323, -43.1747),
+        "Botafogo": (-22.9519, -43.1864),
+        "Catete": (-22.9256, -43.1764),
+        "Copacabana": (-22.9711, -43.1822),
+        "Gávea": (-22.9819, -43.2380),
+        "Glória": (-22.9217, -43.1750),
+        "Humaitá": (-22.9556, -43.2003),
+        "Ipanema": (-22.9838, -43.2045),
+        "Jardim Botânico": (-22.9669, -43.2247),
+        "Lagoa": (-22.9714, -43.2110),
+        "Laranjeiras": (-22.9350, -43.1880),
+        "Leblon": (-22.9836, -43.2233),
+        "Leme": (-22.9636, -43.1678),
+    },
+    "Niterói": {
+        "Centro": (-22.8943, -43.1151),
+        "Icaraí": (-22.9056, -43.1094),
+        "Ingá": (-22.9051, -43.1243),
+        "São Francisco": (-22.9176, -43.0922),
+        # Região Oceânica é extensa; não tem um centro adequado para raio único.
+    },
+}
+
+
+def distancia_km(lat1, lon1, lat2, lon2):
+    """Distância em linha reta pelo método de Haversine."""
+    r = 6371.0088
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2)**2 + math.cos(p1)*math.cos(p2)*math.sin(dl / 2)**2
+    return 2*r*math.asin(min(1, math.sqrt(a)))
+
+
+def filtrar_por_distancia(places, cidade, bairro, raio_km):
+    """Sem raio mantém candidatos; com raio exige coordenadas verificáveis."""
+    if raio_km is None:
+        return places
+    referencia = REFERENCIAS.get(cidade, {}).get(bairro)
+    if referencia is None:
+        return places  # UI impede raio nesses casos
+    selecionados = []
+    for p in places:
+        lat, lon = p.get("latitude"), p.get("longitude")
+        if lat is None or lon is None:
+            continue
+        km = distancia_km(*referencia, lat, lon)
+        if km <= raio_km:
+            selecionados.append({**p, "distancia_km": round(km, 2)})
+    return selecionados
+
+
+def fetch_places(cidade: str, bairro: str, culinaria: str):
+    if not GOOGLE_PLACES_API_KEY:
+        return None, "A chave GOOGLE_PLACES_API_KEY não está configurada nos Secrets."
+
+    local = f"{bairro}, {cidade}" if bairro != "Qualquer Bairro" else cidade
+    termo = "restaurantes" if culinaria == "Outras" else f"restaurantes de culinária {culinaria}"
+    payload = {
+        "textQuery": f"{termo} em {local}, RJ, Brasil",
+        "languageCode": "pt-BR",
+        "regionCode": "BR",
+        "pageSize": 20,
+        "includedType": "restaurant",
+        "strictTypeFiltering": False,
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": GOOGLE_PLACES_API_KEY,
+        "X-Goog-FieldMask": (
+            "places.id,places.displayName,places.formattedAddress,"
+            "places.rating,places.userRatingCount,places.googleMapsUri,"
+            "places.businessStatus,places.location,places.priceLevel,places.priceRange"
+        ),
+    }
+    try:
+        response = requests.post(
+            "https://places.googleapis.com/v1/places:searchText",
+            json=payload, headers=headers, timeout=12
+        )
+        response.raise_for_status()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError("Formato de resposta inesperado")
+        places = []
+        for place in data.get("places", []):
+            if place.get("businessStatus") == "CLOSED_PERMANENTLY":
+                continue
+            places.append({
+                "id": place.get("id", ""),
+                "nome": place.get("displayName", {}).get("text", "Nome indisponível"),
+                "endereco": place.get("formattedAddress", "Endereço indisponível"),
+                "avaliacao": place.get("rating"),
+                "total_avaliacoes": place.get("userRatingCount"),
+                "maps_url": place.get("googleMapsUri", ""),
+                "situacao": place.get("businessStatus", ""),
+                "latitude": place.get("location", {}).get("latitude"),
+                "longitude": place.get("location", {}).get("longitude"),
+                "nivel_preco": place.get("priceLevel"),
+                "faixa_preco": place.get("priceRange"),
+            })
+        logger.info("Consulta Places concluída: %d resultados", len(places))
+        return places, None
+    except (requests.exceptions.RequestException, ValueError, TypeError, KeyError):
+        logger.exception("Falha na consulta Places")
+        return None, "Não foi possível consultar os restaurantes. Verifique a API, a chave, o faturamento e os logs."
+
+
+ORCAMENTOS = {
+    "Até R$ 50": (0, 50),
+    "R$ 50–80": (50, 80),
+    "R$ 80–120": (80, 120),
+    "R$ 120–200": (120, 200),
+    "Acima de R$ 200": (200, None),
+    "Sem preferência": (None, None),
+}
+
+
+def valor_monetario(money):
+    """Converte objeto Money da API em BRL, sem inferir preço por pessoa."""
+    if not isinstance(money, dict) or money.get("currencyCode") != "BRL":
+        return None
+    try:
+        return float(money.get("units", 0)) + float(money.get("nanos", 0)) / 1e9
+    except (ValueError, TypeError):
+        return None
+
+
+def faixa_informada(place):
+    price = place.get("faixa_preco") or {}
+    low = valor_monetario(price.get("startPrice"))
+    high = valor_monetario(price.get("endPrice"))
+    return low, high
+
+
+def classificar_orcamento(place, orcamento):
+    """Classifica evidência monetária do Places; não comprova gasto por pessoa.
+
+    Valores: compativel, parcial, desconhecido, incompatível, sem_filtro.
+    Uma faixa sobreposta é parcial; uma faixa inteiramente contida é compatível.
+    """
+    if orcamento not in ORCAMENTOS or orcamento == "Sem preferência":
+        return "sem_filtro"
+    minimo, maximo = ORCAMENTOS[orcamento]
+    low, high = faixa_informada(place)
+    if low is None and high is None:
+        return "desconhecido"
+    if maximo is not None and low is not None and low > maximo:
+        return "incompatível"
+    if minimo is not None and high is not None and high < minimo:
+        return "incompatível"
+    # Só considerar totalmente compatível se os dois extremos são conhecidos.
+    if (low is not None and high is not None
+            and (minimo is None or low >= minimo)
+            and (maximo is None or high <= maximo)):
+        return "compativel"
+    return "parcial"
+
+
+def compatibilidade_orcamento(place, orcamento):
+    """Compatibilidade histórica para preservar chamadas existentes."""
+    classe = classificar_orcamento(place, orcamento)
+    return classe != "incompatível", classe in ("compativel", "parcial")
+
+
+def pontuacao(place, orcamento):
+    """Peso de sorteio: avaliação suavizada e confiança no volume de avaliações."""
+    rating = place.get("avaliacao")
+    count = place.get("total_avaliacoes") or 0
+    try:
+        rating = max(0.0, min(5.0, float(rating)))
+        count = max(0, int(count))
+    except (TypeError, ValueError):
+        rating, count = 0.0, 0
+    media_suavizada = (rating * count + 4.0 * 50) / (count + 50)
+    _, comprovado = compatibilidade_orcamento(place, orcamento)
+    return max(0.1, (media_suavizada / 5.0) ** 4 * (1.15 if comprovado else 1.0))
+
+
+def escolher_restaurantes(candidatos, anteriores=(), quantidade=3, orcamento="Sem preferência"):
+    """Prioriza evidência de preço; sorteia por qualidade em cada categoria.
+
+    Dentro de cada categoria, prefere restaurantes não mostrados na última rodada.
+    """
+    unicos = list({p["id"]: p for p in candidatos if p.get("id")}.values())
+    anteriores = set(anteriores)
+    rng = random.SystemRandom()
+    selecionados = []
+    grupos = ("compativel", "parcial", "desconhecido") if orcamento in ORCAMENTOS and orcamento != "Sem preferência" else ("sem_filtro",)
+    for categoria in grupos:
+        candidatos_categoria = [p for p in unicos if classificar_orcamento(p, orcamento) == categoria]
+        for grupo in ([p for p in candidatos_categoria if p["id"] not in anteriores],
+                      [p for p in candidatos_categoria if p["id"] in anteriores]):
+            grupo = grupo.copy()
+            while grupo and len(selecionados) < quantidade:
+                pesos = [pontuacao(p, orcamento) for p in grupo]
+                escolhido = rng.choices(grupo, weights=pesos, k=1)[0]
+                selecionados.append(escolhido)
+                grupo.remove(escolhido)
+        if len(selecionados) >= quantidade:
+            break
+    return selecionados
+
+
+def pesquisar_restaurantes(cidade, bairro, culinaria, preco_label="Não informado", repetir=False, raio_km=None):
+    """Fluxo único para o menu, a busca livre e o botão de nova seleção."""
+    filtros = {"cidade": cidade, "bairro": bairro, "culinaria": culinaria, "preco": preco_label, "raio_km": raio_km}
+    anteriores = st.session_state.get("last_place_ids", []) if st.session_state.get("last_place_filters") == filtros else []
+    st.session_state.messages.append({"role": "user", "content": (
+        "Surpreenda-me novamente com outros restaurantes" if repetir else
+        f"Restaurantes de culinária {culinaria} em {bairro if bairro != 'Qualquer Bairro' else cidade} ({cidade})"
+    )})
+    with st.spinner("Consultando restaurantes no Google Places..."):
+        places, error = fetch_places(cidade, bairro, culinaria)
+    if error:
+        st.session_state.messages.append({"role": "assistant", "content": f"⚠️ {error}"})
+        return
+    # Não relaxar silenciosamente o bairro: resultados sem endereço comprovável
+    # são excluídos. A API pode retornar locais de bairros vizinhos.
+    places_validos = [p for p in places if endereco_na_regiao(p["endereco"], cidade, bairro)]
+    excluidos = len(places) - len(places_validos)
+    places_validos = filtrar_por_distancia(places_validos, cidade, bairro, raio_km)
+    orcamento = preco_label if preco_label in ORCAMENTOS else "Sem preferência"
+    places_validos = [p for p in places_validos if compatibilidade_orcamento(p, orcamento)[0]]
+    escolhidos = escolher_restaurantes(places_validos, anteriores, orcamento=orcamento)
+    st.session_state.last_place_filters = filtros
+    st.session_state.last_place_ids = [p["id"] for p in escolhidos]
+    st.session_state.messages.append({
+        "role": "assistant", "kind": "places", "places": escolhidos,
+        **filtros,
+        "total_candidatos": len(places_validos),
+        "total_excluidos": excluidos,
+        "total_sem_preco": sum(classificar_orcamento(p, orcamento) == "desconhecido" for p in places_validos),
+    })
+
+
+def search_gastronomia(preco_label: str):
+    raio = st.session_state.get("raio_selecionado")
+    pesquisar_restaurantes(st.session_state.gastro_cidade, st.session_state.gastro_bairro,
+                           st.session_state.gastro_culinaria, preco_label, raio_km=raio)
+    reset_flow()
+
+
+def normalizar(texto):
+    return "".join(c for c in unicodedata.normalize("NFD", texto.lower())
+                   if unicodedata.category(c) != "Mn")
+
+
+BAIRROS_RIO = ["Aterro do Flamengo", "Botafogo", "Catete", "Copacabana", "Gávea",
+               "Glória", "Humaitá", "Ipanema", "Jardim Botânico", "Lagoa",
+               "Laranjeiras", "Leblon", "Leme"]
+BAIRROS_NIT = ["Centro", "Icaraí", "Ingá", "Região Oceânica", "São Francisco"]
+CULINARIAS = ["Italiana", "Japonesa", "Chinesa", "Peruana", "Árabe", "Brasileira",
+             "Asiática em geral", "Hamburgueria", "Pizzaria"]
+
+
+def extrair_filtros_gastronomia(texto, filtros_anteriores=None):
+    """Roteamento conservador: não supõe cidade para pedidos sem contexto."""
+    t = normalizar(texto)
+    anterior = filtros_anteriores or {}
+    contexto = bool(anterior)
+    repeticao = bool(re.search(r"\b(outro|outra|outros|outras|novamente|mais opcoes|surpreenda)\b", t))
+    palavras = ("restaurante", "comer", "jantar", "almocar", "almoco", "gastronomia",
+                "culinaria", "hamburguer", "pizza", "sushi", "sushis", "rodizio")
+    culinaria = next((c for c in CULINARIAS if normalizar(c) in t), None)
+    if "japones" in t or "japonesa" in t or "sushi" in t:
+        culinaria = "Japonesa"
+    elif "italiano" in t or "italiana" in t:
+        culinaria = "Italiana"
+    elif "chines" in t or "chinesa" in t:
+        culinaria = "Chinesa"
+    elif "arabe" in t:
+        culinaria = "Árabe"
+    elif "hamburguer" in t:
+        culinaria = "Hamburgueria"
+    elif "pizza" in t:
+        culinaria = "Pizzaria"
+    eh_gastro = any(p in t for p in palavras) or bool(culinaria) or (contexto and repeticao)
+    if not eh_gastro:
+        return None
+    cidade = None
+    if "niteroi" in t:
+        cidade = "Niterói"
+    elif "rio de janeiro" in t or "carioca" in t:
+        cidade = "Rio de Janeiro"
+    bairro = None
+    for b in BAIRROS_RIO + BAIRROS_NIT:
+        if normalizar(b) in t:
+            bairro = b
+            if not cidade:
+                cidade = ("Niterói" if b in BAIRROS_NIT and b != "Centro" else
+                          None if b == "Centro" else "Rio de Janeiro")
+            break
+    cidade = cidade or anterior.get("cidade")
+    bairro = bairro or (anterior.get("bairro") if cidade == anterior.get("cidade") else "Qualquer Bairro")
+    culinaria = culinaria or anterior.get("culinaria") or "Outras"
+    if not cidade:
+        return {"needs_city": True, "culinaria": culinaria}
+    return {"cidade": cidade, "bairro": bairro or "Qualquer Bairro", "culinaria": culinaria,
+            "preco": anterior.get("preco", "Não informado")}
+
+
+# ---------------------------------------------------------
 # ESTADO DA SESSÃO E REINICIALIZAÇÃO
 # ---------------------------------------------------------
 if "messages" not in st.session_state:
@@ -187,6 +528,8 @@ if "gastro_culinaria" not in st.session_state:
 def clear_conversation():
     st.session_state.messages = []
     st.session_state.session_id = str(uuid.uuid4())
+    st.session_state.last_place_filters = None
+    st.session_state.last_place_ids = []
     reset_flow()
 
 
@@ -196,13 +539,29 @@ def reset_flow():
     st.session_state.gastro_cidade = None
     st.session_state.gastro_bairro = None
     st.session_state.gastro_culinaria = None
+    st.session_state.raio_selecionado = None
 
 def send_user_message(prompt):
-    st.session_state.messages.append({"role": "user", "content": prompt})
+    filtros = extrair_filtros_gastronomia(prompt, st.session_state.get("last_place_filters"))
+    if filtros:
+        if filtros.get("needs_city"):
+            st.session_state.messages.append({"role": "user", "content": prompt})
+            st.session_state.messages.append({"role": "assistant", "content":
+                "Para pesquisar restaurantes reais, informe a cidade (Rio de Janeiro ou Niterói) e, se desejar, o bairro."})
+        else:
+            pesquisar_restaurantes(
+                cidade=filtros["cidade"],
+                bairro=filtros["bairro"],
+                culinaria=filtros["culinaria"],
+                preco_label=filtros.get("preco", "Não informado"),
+                raio_km=filtros.get("raio_km"),
+            )
+    else:
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        with st.spinner("Consultando recomendações..."):
+            bot_reply = detect_intent(prompt)
+            st.session_state.messages.append({"role": "assistant", "content": bot_reply})
     reset_flow()
-    with st.spinner("Consultando recomendações..."):
-        bot_reply = detect_intent(prompt)
-        st.session_state.messages.append({"role": "assistant", "content": bot_reply})
 
 # ---------------------------------------------------------
 # BARRA LATERAL (SIDEBAR)
@@ -218,6 +577,15 @@ with st.sidebar:
 # ---------------------------------------------------------
 st.title("🎭 Curador de Lazer e Cultura")
 st.caption("Escolha uma opção nos cartões abaixo ou monte seu filtro personalizado:")
+
+# Campo inline: evita que o chat fixo no rodapé provoque saltos de rolagem.
+with st.container():
+    with st.form("busca_livre_form", clear_on_submit=True):
+        entrada_livre = st.text_input("Busca livre", placeholder="Ex.: restaurantes japoneses em Botafogo")
+        enviar = st.form_submit_button("Pesquisar")
+    if enviar and entrada_livre.strip():
+        send_user_message(entrada_livre.strip())
+        st.rerun()
 
 # MENU PRINCIPAL (ETAPA 0)
 if st.session_state.current_step == 0:
@@ -413,26 +781,25 @@ elif st.session_state.active_flow == "gastronomia":
 
     elif st.session_state.current_step == 4:
         with st.container(border=True):
-            st.subheader(f"💰 Passo 4 de 4: Faixa de preço ({st.session_state.gastro_culinaria})")
+            st.subheader(f"💰 Passo 4 de 4: Orçamento ({st.session_state.gastro_culinaria})")
+            st.caption("As faixas do Google Places são indicativas e não representam necessariamente o gasto por pessoa. Locais sem informação de preço são alternativas, priorizadas apenas depois das opções com faixa monetária compatível.")
 
-            precos = [
-                ("$", "Econômico ($)"),
-                ("$$", "Moderado ($$)"),
-                ("$$$", "Sofisticado ($$$)"),
-                ("$$$$", "Alta Gastronomia ($$$$)")
-            ]
+            bairro_atual = st.session_state.gastro_bairro
+            referencia_disponivel = bairro_atual in REFERENCIAS.get(st.session_state.gastro_cidade, {})
+            if referencia_disponivel:
+                opcoes_raio = {"Somente bairro (sem raio)": None, "Até 1 km": 1.0,
+                               "Até 2 km": 2.0, "Até 5 km": 5.0}
+                escolha_raio = st.selectbox("Distância máxima em linha reta a partir do centro aproximado do bairro", list(opcoes_raio), key="seletor_raio")
+                st.session_state.raio_selecionado = opcoes_raio[escolha_raio]
+                st.caption("O filtro de bairro continua obrigatório. Distância não representa trajeto a pé ou de carro.")
+            else:
+                st.session_state.raio_selecionado = None
+                st.caption("Raio indisponível para Qualquer Bairro e Região Oceânica; mantém-se o filtro por endereço.")
 
-            cols = st.columns(4)
-            for i, (simbolo, rotulo) in enumerate(precos):
-                with cols[i]:
-                    if st.button(rotulo, key=f"p_{i}", use_container_width=True):
-                        if st.session_state.gastro_bairro == "Qualquer Bairro":
-                            prompt = f"Recomende restaurantes de culinária {st.session_state.gastro_culinaria} com faixa de preço {simbolo} em {st.session_state.gastro_cidade}."
-                        else:
-                            prompt = f"Recomende restaurantes de culinária {st.session_state.gastro_culinaria} com faixa de preço {simbolo} em {st.session_state.gastro_cidade}, de preferência na região de {st.session_state.gastro_bairro}."
-                        
-                        send_user_message(prompt)
-                        st.rerun()
+            orcamento = st.selectbox("Orçamento desejado por pessoa (referência)", list(ORCAMENTOS), index=5)
+            if st.button("Buscar restaurantes", use_container_width=True):
+                search_gastronomia(orcamento)
+                st.rerun()
 
             st.divider()
             if st.button("⬅️ Voltar para Culinárias"):
@@ -441,13 +808,53 @@ elif st.session_state.active_flow == "gastronomia":
 
 st.divider()
 
-# ---------------------------------------------------------
-# HISTÓRICO DE MENSAGENS E BUSCA LIVRE
-# ---------------------------------------------------------
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.markdown(msg["content"])
-
-if user_input := st.chat_input("Ou digite uma busca específica..."):
-    send_user_message(user_input)
-    st.rerun()
+# Histórico em região delimitada, sem chat_input fixo no rodapé.
+st.subheader("Histórico de recomendações")
+with st.container(height=420, border=True):
+    for idx, msg in enumerate(st.session_state.messages):
+        with st.chat_message(msg["role"]):
+            if msg.get("kind") == "places":
+                st.markdown(f"**{len(msg['places'])} sugestão(ões) selecionada(s) do Google Places**")
+                st.caption(f"Busca: {msg['culinaria']} · {msg['bairro']} · {msg['cidade']}")
+                if msg.get("raio_km") is not None:
+                    st.caption(f"Raio máximo: {msg['raio_km']:g} km do ponto aproximado do bairro")
+                st.caption("Orçamento selecionado: " + str(msg.get("preco", "Sem preferência")) + ". Os valores do Google Places não garantem gasto por pessoa; confirme o cardápio.")
+                if not msg["places"]:
+                    st.info("Não encontrei restaurantes cujo endereço confirme a região escolhida. Tente outro bairro ou 'Qualquer Bairro'.")
+                for place in msg["places"]:
+                    with st.container(border=True):
+                        st.markdown(f"**{place['nome']}**")
+                        st.write(place["endereco"])
+                        if place.get("distancia_km") is not None:
+                            st.caption(f"Distância em linha reta: {place['distancia_km']:.2f} km do ponto de referência")
+                        low, high = faixa_informada(place)
+                        if low is not None or high is not None:
+                            preco_texto = (f"R$ {low:,.0f}" if low is not None else "valor inicial indisponível")
+                            if high is not None:
+                                preco_texto += f" a R$ {high:,.0f}"
+                            st.caption(f"Faixa indicativa informada pelo Google: {preco_texto} (não necessariamente por pessoa)")
+                        elif place.get("nivel_preco"):
+                            st.caption(f"Nível de preço Google: {place['nivel_preco']} (sem valor em reais confirmado)")
+                        else:
+                            st.caption("Preço não informado pelo Google")
+                        classe_preco = classificar_orcamento(place, msg.get("preco", "Sem preferência"))
+                        if classe_preco == "compativel":
+                            st.caption("Faixa monetária informada integralmente dentro do orçamento de referência; gasto por pessoa não garantido.")
+                        elif classe_preco == "parcial":
+                            st.caption("Faixa monetária parcialmente compatível ou incompleta; confirme os valores antes de visitar.")
+                        elif classe_preco == "desconhecido":
+                            st.caption("Alternativa sem preço monetário verificado para o orçamento escolhido.")
+                        if place["avaliacao"] is not None:
+                            st.write(f"Avaliação Google: {place['avaliacao']}/5 · {place['total_avaliacoes'] or 0} avaliações")
+                        if place["situacao"] == "CLOSED_TEMPORARILY":
+                            st.warning("Marcado como temporariamente fechado")
+                        if place["maps_url"]:
+                            st.link_button("Ver no Google Maps", place["maps_url"])
+                if idx == len(st.session_state.messages) - 1 and msg["places"]:
+                    if st.button("Surpreenda-me novamente", key=f"repeat_{idx}"):
+                        pesquisar_restaurantes(msg["cidade"], msg["bairro"], msg["culinaria"], msg["preco"], repetir=True, raio_km=msg.get("raio_km"))
+                        st.rerun()
+                st.caption(f"Dados: Google Maps. {msg.get('total_excluidos', 0)} resultado(s) descartado(s) por não confirmar a região no endereço.")
+                st.caption("Filtro geográfico conservador por endereço; não equivale a limites oficiais de bairros. O Google pode omitir o bairro no endereço de locais válidos.")
+            else:
+                st.markdown(msg["content"])

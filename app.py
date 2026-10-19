@@ -531,6 +531,7 @@ def clear_conversation():
     st.session_state.last_place_filters = None
     st.session_state.last_place_ids = []
     reset_flow()
+    st.session_state.confirmar_limpeza = False
 
 
 def reset_flow():
@@ -564,64 +565,122 @@ def send_user_message(prompt):
     reset_flow()
 
 # ---------------------------------------------------------
+# APRESENTAÇÃO GASTRONÔMICA — JUSTIFICATIVAS VERIFICÁVEIS
+# ---------------------------------------------------------
+def resumo_restaurante(place, culinaria):
+    """Descreve somente a categoria buscada, sem inventar características do local."""
+    categoria = (culinaria or "").strip()
+    if categoria and categoria != "Outras":
+        return (f"Restaurante encontrado em uma busca por {categoria.lower()}. "
+                "A especialidade e os pratos disponíveis devem ser confirmados no cardápio.")
+    return "Restaurante encontrado na região selecionada. Consulte o cardápio para conhecer a proposta gastronômica."
+
+
+def justificativa_restaurante(place, orcamento):
+    """Explica a seleção a partir de sinais efetivamente recebidos do Google Places."""
+    razoes = ["Corresponde aos filtros de localização da pesquisa"]
+    nota = place.get("avaliacao")
+    total = place.get("total_avaliacoes") or 0
+    if isinstance(nota, (int, float)) and total:
+        razoes.append(f"tem nota {nota:g}/5 com {total} avaliações no Google")
+    classe = classificar_orcamento(place, orcamento)
+    if classe == "compativel":
+        razoes.append("a faixa de preços informada está dentro do orçamento de referência")
+    elif classe == "parcial":
+        razoes.append("a faixa de preços informada se sobrepõe ao orçamento de referência")
+    return "; ".join(razoes) + "."
+
+
+def formatar_preco_restaurante(place):
+    low, high = faixa_informada(place)
+    def reais(valor):
+        return f"R$ {valor:,.0f}".replace(",", ".")
+    if low is not None and high is not None:
+        return f"{reais(low)} a {reais(high)}"
+    if low is not None:
+        return f"A partir de {reais(low)}"
+    if high is not None:
+        return f"Até {reais(high)}"
+    if place.get("nivel_preco"):
+        return "Nível de preço disponível; valor em reais não informado"
+    return "Não informado pelo Google"
+
+
+# ---------------------------------------------------------
 # BARRA LATERAL (SIDEBAR)
 # ---------------------------------------------------------
+# Ajustes visuais discretos: preservam o tema configurado pelo usuário.
+st.markdown("""
+<style>
+.block-container {max-width: 1160px; padding-top: 1.5rem; padding-bottom: 2.5rem;}
+[data-testid="stVerticalBlock"] {gap: .75rem;}
+[data-testid="stButton"] button {min-height: 2.65rem; border-radius: .65rem;}
+[data-testid="stForm"] {border-radius: .85rem;}
+@media (max-width: 640px) {
+  .block-container {padding: 1rem .85rem 2rem;}
+  h1 {font-size: 1.8rem !important;}
+}
+</style>
+""", unsafe_allow_html=True)
+
 with st.sidebar:
-    st.header("⚙️ Opções")
-    if st.button("🗑️ Limpar Conversa", use_container_width=True):
+    st.header("⚙️ Preferências")
+    st.caption("Gerencie sua sessão e as recomendações exibidas.")
+    st.checkbox("Confirmar limpeza do histórico", key="confirmar_limpeza",
+                help="Marque esta opção antes de apagar a conversa.")
+    if st.button("🗑️ Limpar histórico", use_container_width=True,
+                 disabled=not st.session_state.get("confirmar_limpeza", False)):
         clear_conversation()
         st.rerun()
+    st.divider()
+    st.caption("🔒 A limpeza remove o histórico desta sessão e reinicia o contexto das buscas.")
 
-# ---------------------------------------------------------
-# INTERFACE PRINCIPAL
-# ---------------------------------------------------------
 st.title("🎭 Curador de Lazer e Cultura")
-st.caption("Escolha uma opção nos cartões abaixo ou monte seu filtro personalizado:")
+st.caption("Descubra restaurantes, filmes e passeios. Escolha uma categoria ou faça uma busca livre.")
 
-# Campo inline: evita que o chat fixo no rodapé provoque saltos de rolagem.
-with st.container():
-    with st.form("busca_livre_form", clear_on_submit=True):
-        entrada_livre = st.text_input("Busca livre", placeholder="Ex.: restaurantes japoneses em Botafogo")
-        enviar = st.form_submit_button("Pesquisar")
-    if enviar and entrada_livre.strip():
-        send_user_message(entrada_livre.strip())
-        st.rerun()
+with st.form("busca_livre_form", clear_on_submit=True):
+    entrada_livre = st.text_input("🔎 O que você procura?", placeholder="Ex.: restaurantes japoneses em Botafogo")
+    enviar = st.form_submit_button("🔎 Pesquisar", use_container_width=True)
+if enviar and entrada_livre.strip():
+    send_user_message(entrada_livre.strip())
+    st.rerun()
 
 # MENU PRINCIPAL (ETAPA 0)
 if st.session_state.current_step == 0:
-    col1, col2, col3, col4 = st.columns(4)
+    st.subheader("✨ Explore por categoria")
+    col1, col2, col3, col4 = st.columns(4, gap="medium")
 
     with col1:
-        with st.container(border=True):
+        with st.container(border=True, height=190):
             st.markdown("### 🍣 Gastronomia")
-            st.write("Filtre por Cidade, Bairro, Culinária e Preço.")
-            if st.button("Explorar Gastronomia", key="btn_gastro", use_container_width=True):
+            st.write("Escolha cidade, bairro, culinária e orçamento.")
+            if st.button("Explorar restaurantes", key="btn_gastro", use_container_width=True):
                 st.session_state.active_flow = "gastronomia"
                 st.session_state.current_step = 1
                 st.rerun()
 
     with col2:
-        with st.container(border=True):
-            st.markdown("### 🎬 Cultura & Arte")
-            st.write("Consulte filmes em cartaz e futuras estreias.")
-            if st.button("Ver Programação de Cinema", key="btn_cultura", use_container_width=True):
+        with st.container(border=True, height=190):
+            st.markdown("### 🎬 Cultura e Arte")
+            st.write("Veja filmes em cartaz e próximas estreias.")
+            if st.button("Ver filmes", key="btn_cultura", use_container_width=True):
                 st.session_state.active_flow = "cultura"
                 st.session_state.current_step = 1
                 st.rerun()
 
     with col3:
-        with st.container(border=True):
-            st.markdown("### 🌳 Ao Ar Livre")
+        with st.container(border=True, height=190):
+            st.markdown("### 🌳 Ao ar livre")
             st.write("Parques, praças, trilhas e natureza.")
-            if st.button("Passeios ao Ar Livre", key="btn_parques", use_container_width=True):
+            if st.button("Explorar passeios", key="btn_parques", use_container_width=True):
                 send_user_message("Recomende passeios ao ar livre e parques")
                 st.rerun()
 
     with col4:
-        with st.container(border=True):
-            st.markdown("### 🎉 Fim de Semana")
-            st.write("Dicas para aproveitar o sábado e domingo.")
-            if st.button("Dicas de Fim de Semana", key="btn_fds", use_container_width=True):
+        with st.container(border=True, height=190):
+            st.markdown("### 🎉 Fim de semana")
+            st.write("Encontre ideias para sábado e domingo.")
+            if st.button("Ver sugestões", key="btn_fds", use_container_width=True):
                 send_user_message("O que fazer este fim de semana?")
                 st.rerun()
 
@@ -809,52 +868,68 @@ elif st.session_state.active_flow == "gastronomia":
 st.divider()
 
 # Histórico em região delimitada, sem chat_input fixo no rodapé.
-st.subheader("Histórico de recomendações")
-with st.container(height=420, border=True):
-    for idx, msg in enumerate(st.session_state.messages):
+st.subheader("📋 Recomendações")
+if st.session_state.messages:
+    st.caption("As recomendações mais recentes aparecem primeiro. O histórico fica nesta área para evitar rolagens longas na página.")
+    mostrar_tudo = st.checkbox("📚 Mostrar todo o histórico", value=False, key="mostrar_historico")
+    mensagens = list(enumerate(st.session_state.messages))
+    if not mostrar_tudo:
+        mensagens = mensagens[-2:]
+    mensagens.reverse()
+else:
+    st.info("Suas recomendações aparecerão aqui depois da primeira pesquisa.")
+    mensagens = []
+with st.container(height=510, border=True):
+    for idx, msg in mensagens:
         with st.chat_message(msg["role"]):
             if msg.get("kind") == "places":
-                st.markdown(f"**{len(msg['places'])} sugestão(ões) selecionada(s) do Google Places**")
+                st.markdown(f"**🍽️ Restaurantes sugeridos: {len(msg['places'])}**")
                 st.caption(f"Busca: {msg['culinaria']} · {msg['bairro']} · {msg['cidade']}")
                 if msg.get("raio_km") is not None:
                     st.caption(f"Raio máximo: {msg['raio_km']:g} km do ponto aproximado do bairro")
-                st.caption("Orçamento selecionado: " + str(msg.get("preco", "Sem preferência")) + ". Os valores do Google Places não garantem gasto por pessoa; confirme o cardápio.")
+                st.caption("💰 Orçamento: " + str(msg.get("preco", "Sem preferência")) + ". Preços de referência; confirme o valor por pessoa no cardápio.")
                 if not msg["places"]:
-                    st.info("Não encontrei restaurantes cujo endereço confirme a região escolhida. Tente outro bairro ou 'Qualquer Bairro'.")
+                    st.info("Nenhum restaurante correspondeu aos filtros escolhidos. Tente outro bairro, aumente a distância ou escolha uma faixa de preço mais ampla.")
                 for place in msg["places"]:
                     with st.container(border=True):
-                        st.markdown(f"**{place['nome']}**")
+                        st.markdown(f"### 🍽️ {place['nome']}")
+                        st.caption(f"📍 {msg['bairro']} · {msg['cidade']} — região selecionada na pesquisa")
+
+                        st.markdown("**🍴 O que é**")
+                        st.write(resumo_restaurante(place, msg.get("culinaria")))
+                        st.markdown("**💡 Por que foi selecionado**")
+                        st.write(justificativa_restaurante(place, msg.get("preco", "Sem preferência")))
+
+                        coluna_preco, coluna_nota = st.columns(2, gap="medium")
+                        with coluna_preco:
+                            st.markdown("**💰 Preço de referência**")
+                            st.write(formatar_preco_restaurante(place))
+                        with coluna_nota:
+                            st.markdown("**⭐ Avaliação no Google**")
+                            if place.get("avaliacao") is not None:
+                                st.write(f"{place['avaliacao']}/5 · {place.get('total_avaliacoes') or 0} avaliações")
+                            else:
+                                st.write("Não informada")
+
+                        st.markdown("**📍 Endereço e acesso**")
                         st.write(place["endereco"])
                         if place.get("distancia_km") is not None:
-                            st.caption(f"Distância em linha reta: {place['distancia_km']:.2f} km do ponto de referência")
-                        low, high = faixa_informada(place)
-                        if low is not None or high is not None:
-                            preco_texto = (f"R$ {low:,.0f}" if low is not None else "valor inicial indisponível")
-                            if high is not None:
-                                preco_texto += f" a R$ {high:,.0f}"
-                            st.caption(f"Faixa indicativa informada pelo Google: {preco_texto} (não necessariamente por pessoa)")
-                        elif place.get("nivel_preco"):
-                            st.caption(f"Nível de preço Google: {place['nivel_preco']} (sem valor em reais confirmado)")
-                        else:
-                            st.caption("Preço não informado pelo Google")
+                            st.caption(f"Distância em linha reta: {place['distancia_km']:.2f} km do ponto de referência do bairro.")
                         classe_preco = classificar_orcamento(place, msg.get("preco", "Sem preferência"))
-                        if classe_preco == "compativel":
-                            st.caption("Faixa monetária informada integralmente dentro do orçamento de referência; gasto por pessoa não garantido.")
+                        if classe_preco == "desconhecido":
+                            st.caption("Não há faixa monetária verificada para o orçamento escolhido.")
                         elif classe_preco == "parcial":
-                            st.caption("Faixa monetária parcialmente compatível ou incompleta; confirme os valores antes de visitar.")
-                        elif classe_preco == "desconhecido":
-                            st.caption("Alternativa sem preço monetário verificado para o orçamento escolhido.")
-                        if place["avaliacao"] is not None:
-                            st.write(f"Avaliação Google: {place['avaliacao']}/5 · {place['total_avaliacoes'] or 0} avaliações")
-                        if place["situacao"] == "CLOSED_TEMPORARILY":
-                            st.warning("Marcado como temporariamente fechado")
-                        if place["maps_url"]:
-                            st.link_button("Ver no Google Maps", place["maps_url"])
+                            st.caption("A faixa de preço é parcial ou incompleta; confirme os valores antes de visitar.")
+                        st.caption("Os preços são indicativos e não representam necessariamente o gasto por pessoa.")
+                        if place.get("situacao") == "CLOSED_TEMPORARILY":
+                            st.warning("O Google informa que este local está temporariamente fechado.")
+                        if place.get("maps_url"):
+                            st.link_button("🗺️ Ver no Google Maps", place["maps_url"], use_container_width=True)
                 if idx == len(st.session_state.messages) - 1 and msg["places"]:
-                    if st.button("Surpreenda-me novamente", key=f"repeat_{idx}"):
+                    if st.button("🎲 Mostrar outras opções", key=f"repeat_{idx}", use_container_width=True):
                         pesquisar_restaurantes(msg["cidade"], msg["bairro"], msg["culinaria"], msg["preco"], repetir=True, raio_km=msg.get("raio_km"))
                         st.rerun()
                 st.caption(f"Dados: Google Maps. {msg.get('total_excluidos', 0)} resultado(s) descartado(s) por não confirmar a região no endereço.")
-                st.caption("Filtro geográfico conservador por endereço; não equivale a limites oficiais de bairros. O Google pode omitir o bairro no endereço de locais válidos.")
+                st.caption("📍 A localização é verificada pelo endereço informado pelo Google e pode não refletir os limites oficiais dos bairros.")
             else:
                 st.markdown(msg["content"])
